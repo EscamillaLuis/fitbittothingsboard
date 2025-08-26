@@ -1,0 +1,22 @@
+{
+    "23QFPB": {
+        "access_token": "eyJhbGciOiJIUzI1NiJ9.eyJhdWQiOiIyM1FGUEIiLCJzdWIiOiJDUEhCUTgiLCJpc3MiOiJGaXRiaXQiLCJ0eXAiOiJhY2Nlc3NfdG9rZW4iLCJzY29wZXMiOiJ3aHIgd3BybyB3bnV0IHdzbGUgd3dlaSB3YWN0IHdzZXQgd294eSB3bG9jIHdyZXMiLCJleHAiOjE3NTYyNTI4MzgsImlhdCI6MTc1NjIyNDAzOH0.ugDr-dAo-koYQCombJSyErOWIC_Ss80AvaosBkCyG6Y",
+        "expires_in": 28800,
+        "refresh_token": "4b39bedb894d32f4c0ebfa63096d9ba9069eb5bd484a20527eb28bd5f916bdeb",
+        "scope": [
+            "profile",
+            "oxygen_saturation",
+            "activity",
+            "heartrate",
+            "settings",
+            "nutrition",
+            "location",
+            "sleep",
+            "respiratory_rate",
+            "weight"
+        ],
+        "token_type": "Bearer",
+        "user_id": "CPHBQ8",
+        "expires_at": 1756252839
+    }
+}
