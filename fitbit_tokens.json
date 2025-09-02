@@ -1,22 +1,18 @@
 {
-    "23QFPB": {
-        "access_token": "eyJhbGciOiJIUzI1NiJ9.eyJhdWQiOiIyM1FGUEIiLCJzdWIiOiJDUEhCUTgiLCJpc3MiOiJGaXRiaXQiLCJ0eXAiOiJhY2Nlc3NfdG9rZW4iLCJzY29wZXMiOiJ3aHIgd3BybyB3bnV0IHdzbGUgd3dlaSB3YWN0IHdzZXQgd294eSB3bG9jIHdyZXMiLCJleHAiOjE3NTYyNTI4MzgsImlhdCI6MTc1NjIyNDAzOH0.ugDr-dAo-koYQCombJSyErOWIC_Ss80AvaosBkCyG6Y",
+    "23QHS5": {
+        "access_token": "eyJhbGciOiJIUzI1NiJ9.eyJhdWQiOiIyM1FIUzUiLCJzdWIiOiJDQ1daN04iLCJpc3MiOiJGaXRiaXQiLCJ0eXAiOiJhY2Nlc3NfdG9rZW4iLCJzY29wZXMiOiJ3aHIgd251dCB3cHJvIHdzbGUgd3dlaSB3c2V0IHdhY3Qgd294eSB3cmVzIHdsb2MiLCJleHAiOjE3NTY4NTk2MDUsImlhdCI6MTc1NjgzMDgwNX0.X8mkD84ZPK26e4ANXKsPClVXE1eoff0tFOSsSBNeuw0",
         "expires_in": 28800,
-        "refresh_token": "4b39bedb894d32f4c0ebfa63096d9ba9069eb5bd484a20527eb28bd5f916bdeb",
-        "scope": [
-            "profile",
-            "oxygen_saturation",
-            "activity",
-            "heartrate",
-            "settings",
-            "nutrition",
-            "location",
-            "sleep",
-            "respiratory_rate",
-            "weight"
-        ],
+        "refresh_token": "b42205f1658cd67e3e11ba5894d6718f8107b158e3f9969622c98f5d85cdfc0e",
+        "scope": "sleep settings oxygen_saturation respiratory_rate nutrition activity heartrate profile weight location",
         "token_type": "Bearer",
-        "user_id": "CPHBQ8",
-        "expires_at": 1756252839
+        "user_id": "CCWZ7N"
+    },
+    "23QFPB": {
+        "access_token": "eyJhbGciOiJIUzI1NiJ9.eyJhdWQiOiIyM1FGUEIiLCJzdWIiOiJDUEhCUTgiLCJpc3MiOiJGaXRiaXQiLCJ0eXAiOiJhY2Nlc3NfdG9rZW4iLCJzY29wZXMiOiJ3aHIgd251dCB3cHJvIHdzbGUgd3dlaSB3c2V0IHdhY3Qgd294eSB3cmVzIHdsb2MiLCJleHAiOjE3NTY4NTk2NzEsImlhdCI6MTc1NjgzMDg3MX0.YHCNXpRyUnBklF2UUF4YQZkQ8hwd9b-fqlO979TsBtw",
+        "expires_in": 28800,
+        "refresh_token": "a52ea0b05779aaf6383b9736bf5ee1211104a70d5f00bdb0b7d93c478f0285dd",
+        "scope": "sleep settings oxygen_saturation nutrition respiratory_rate activity heartrate profile weight location",
+        "token_type": "Bearer",
+        "user_id": "CPHBQ8"
     }
 }
