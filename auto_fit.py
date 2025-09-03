@@ -16,9 +16,29 @@ CREDENTIALS_FILE = "credentials.json"
 CLIENT_IDS_FILE = "client_ids.txt"
 THINGSBOARD_TOKENS_FILE = "thingsboard_tokens.json"
 DATA_DIR = "fitbit_data"
-DEFAULT_WINDOW = 60       
-DEFAULT_INTERVAL = 3000    
-CHUNK_SIZE = 6            
+DEFAULT_WINDOW = 60
+DEFAULT_INTERVAL = 3000
+CHUNK_SIZE = 6
+
+LOG_FILE = os.path.expanduser('~/logs/auto_fit.log')
+os.makedirs(os.path.dirname(LOG_FILE), exist_ok=True)
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s %(message)s',
+    handlers=[
+        logging.FileHandler(LOG_FILE, encoding='utf-8'),
+        logging.StreamHandler()
+    ]
+)
+
+
+def log_print(*args, **kwargs):
+    sep = kwargs.get('sep', ' ')
+    message = sep.join(str(a) for a in args)
+    logging.info(message)
+
+
+builtins.print = log_print           
 
 
 def load_json(path):
