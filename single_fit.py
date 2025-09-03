@@ -134,7 +134,6 @@ def timed_request(session: requests.Session, method: str, url: str, headers: Dic
     )
     return response 
 
-
 os.environ['OAUTHLIB_INSECURE_TRANSPORT'] = '1'
 
 os.makedirs(DATA_DIR, exist_ok=True)
@@ -659,7 +658,7 @@ def refresh_access_token(client_id: str, client_secret: str) -> Optional[str]:
     except requests.exceptions.RequestException as e:
         print(f"Error de conexión: {e}")
         return None
-        
+
 def get_fitbit_data(client_id: str, client_secret: str, date: str) -> Optional[Dict]:
     token = refresh_access_token(client_id, client_secret)
     if not token:
