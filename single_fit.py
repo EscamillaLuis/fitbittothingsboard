@@ -3,6 +3,15 @@ import json
 import time
 import webbrowser
 import requests
+import socket
+import ssl
+import logging
+from urllib.parse import urlparse
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
+from urllib3.util import connection as urllib3_connection
+from urllib3.util import ssl_ as urllib3_ssl
+import certifi
 from base64 import b64encode
 from datetime import datetime, timedelta
 from typing import Optional, Dict, List
@@ -29,7 +38,101 @@ from send_to_thingsboard import (
 )
 THINGSBOARD_MQTT_HOST = 'thingsboard.cloud'
 THINGSBOARD_MQTT_PORT = 1883
-AGG_WINDOW_SECONDS = 60  
+AGG_WINDOW_SECONDS = 60
+
+DEFAULT_TIMEOUT = (5, 30)
+
+logger = logging.getLogger(__name__)
+logging.basicConfig(level=logging.INFO)
+
+_conn_timings = threading.local()
+
+
+def _force_ipv4() -> int:
+    return socket.AF_INET
+
+
+urllib3_connection.allowed_gai_family = _force_ipv4
+
+_original_create_connection = urllib3_connection.create_connection
+_original_ssl_wrap_socket = urllib3_ssl.ssl_wrap_socket
+
+
+def _create_connection_timed(address, timeout=socket._GLOBAL_DEFAULT_TIMEOUT,
+                             source_address=None, socket_options=None, **kwargs):
+    host, port = address
+    dns_start = time.perf_counter()
+    addrinfos = socket.getaddrinfo(host, port, family=_force_ipv4(), type=socket.SOCK_STREAM)
+    dns_end = time.perf_counter()
+    _conn_timings.dns = dns_end - dns_start
+    _conn_timings.addrs = [ai[4][0] for ai in addrinfos]
+    for af, socktype, proto, canonname, sa in addrinfos:
+        sock = socket.socket(af, socktype, proto)
+        _conn_timings.family = af
+        if socket_options:
+            for opt in socket_options:
+                sock.setsockopt(*opt)
+        if source_address:
+            sock.bind(source_address)
+        if timeout is not socket._GLOBAL_DEFAULT_TIMEOUT:
+            sock.settimeout(timeout)
+        connect_start = time.perf_counter()
+        sock.connect(sa)
+        connect_end = time.perf_counter()
+        _conn_timings.connect = connect_end - connect_start
+        return sock
+    raise OSError("Unable to connect")
+
+
+def _ssl_wrap_socket_timed(sock, *args, **kwargs):
+    tls_start = time.perf_counter()
+    ssock = _original_ssl_wrap_socket(sock, *args, **kwargs)
+    tls_end = time.perf_counter()
+    _conn_timings.tls = tls_end - tls_start
+    try:
+        _conn_timings.cert = ssock.getpeercert()
+    except Exception:
+        _conn_timings.cert = {}
+    return ssock
+
+
+urllib3_connection.create_connection = _create_connection_timed
+urllib3_ssl.ssl_wrap_socket = _ssl_wrap_socket_timed
+
+
+def create_session() -> requests.Session:
+    session = requests.Session()
+    retry = Retry(total=5, connect=5, read=5, backoff_factor=0.5,
+                  status_forcelist=[429, 500, 502, 503, 504])
+    adapter = HTTPAdapter(max_retries=retry)
+    session.mount("https://", adapter)
+    session.mount("http://", adapter)
+    session.verify = certifi.where()
+    return session
+
+
+def timed_request(session: requests.Session, method: str, url: str, headers: Dict = None,
+                  timeout: tuple = DEFAULT_TIMEOUT, **kwargs) -> requests.Response:
+    _conn_timings.dns = _conn_timings.connect = _conn_timings.tls = None
+    start = time.perf_counter()
+    response = session.request(method, url, headers=headers, timeout=timeout, **kwargs)
+    ttfb = response.elapsed.total_seconds()
+    total = time.perf_counter() - start
+    host = urlparse(url).hostname
+    family = "IPv6" if getattr(_conn_timings, 'family', socket.AF_INET) == socket.AF_INET6 else "IPv4"
+    ips = getattr(_conn_timings, 'addrs', [])
+    logger.info(
+        "[%s] DNS %.3fms connect %.3fms TLS %.3fms TTFB %.3fms total %.3fms IPs %s family %s",
+        host,
+        (_conn_timings.dns or 0) * 1000,
+        (_conn_timings.connect or 0) * 1000,
+        (_conn_timings.tls or 0) * 1000,
+        ttfb * 1000,
+        total * 1000,
+        ips,
+        family,
+    )
+    return response 
 
 
 os.environ['OAUTHLIB_INSECURE_TRANSPORT'] = '1'
@@ -536,7 +639,8 @@ def refresh_access_token(client_id: str, client_secret: str) -> Optional[str]:
 
     try:
         time.sleep(API_DELAY)
-        response = requests.post(TOKEN_URL, headers=headers, data=data)
+        session = create_session()
+        response = timed_request(session, "POST", TOKEN_URL, headers=headers, data=data)
         response.raise_for_status()
         new_token = response.json()
 
@@ -555,38 +659,20 @@ def refresh_access_token(client_id: str, client_secret: str) -> Optional[str]:
     except requests.exceptions.RequestException as e:
         print(f"Error de conexión: {e}")
         return None
-
-def api_request(url: str, data_key: str = None) -> Optional[Dict]:
-    time.sleep(API_DELAY)
-    try:
-        response = requests.get(url)
-        if response.status_code == 200:
-            return response.json().get(data_key) if data_key else response.json()
-        elif response.status_code == 404:
-            print(f"Datos no encontrados en {url}")
-            return None
-        elif response.status_code == 403:
-            print(f"Permisos insuficientes para {url}")
-            return None
-        else:
-            print(f"Error en {url}: {response.status_code} - {response.text}")
-            return None
-    except Exception as e:
-        print(f"Error en petición a {url}: {e}")
-        return None
-
+        
 def get_fitbit_data(client_id: str, client_secret: str, date: str) -> Optional[Dict]:
     token = refresh_access_token(client_id, client_secret)
     if not token:
         return None
 
     headers = {"Authorization": f"Bearer {token}"}
+    session = create_session()
     result = {"Fecha": date, "ID_Cliente": client_id}
 
     def api_request(url: str, data_key: str = None) -> Optional[Dict]:
         time.sleep(API_DELAY)
         try:
-            response = requests.get(url, headers=headers)
+            response = timed_request(session, "GET", url, headers=headers)
             if response.status_code == 200:
                 return response.json().get(data_key) if data_key else response.json()
             elif response.status_code == 404:
