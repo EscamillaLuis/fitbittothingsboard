@@ -1,12 +1,12 @@
 {
     "23QHS5": {
-        "access_token": "eyJhbGciOiJIUzI1NiJ9.eyJhdWQiOiIyM1FIUzUiLCJzdWIiOiJDQ1daN04iLCJpc3MiOiJGaXRiaXQiLCJ0eXAiOiJhY$        
+        "access_token": "eyJhbGciOiJIUzI1NiJ9.eyJhdWQiOiIyM1FIUzUiLCJzdWIiOiJDQ1daN04iLCJpc3MiOiJGaXRiaXQiLCJ0eXAiOiJhY2Nlc3NfdG9rZW4iLCJzY29wZXMiOiJ3aHIgd251dCB3cHJvIHdzbGUgd3dlaSB3c2V0IHdhY3Qgd294eSB3cmVzIHdsb2MiLCJleHAiOjE3NTY4Njk5MjMsImlhdCI6MTc1Njg0MTEyM30.Wt7Cck8gjaGcwDgokr2Dnd1IjQ5PUXfYGMkf5qo8cdo",
         "expires_in": 28800,
         "refresh_token": "979e9f7d83dda91e4d8227c72f240973460d0b72df9836b7a65866235a7680ec",
-        "scope": "sleep settings oxygen_saturation respiratory_rate nutrition activity heartrate profile weight locatio$        
+        "scope": "sleep settings oxygen_saturation respiratory_rate nutrition activity heartrate profile weight location",
         "token_type": "Bearer",
         "user_id": "CCWZ7N"
-    },
+    },,
     "23QFPB": {
         "access_token": "eyJhbGciOiJIUzI1NiJ9.eyJhdWQiOiIyM1FGUEIiLCJzdWIiOiJDUEhCUTgiLCJpc3MiOiJGaXRiaXQiLCJ0eXAiOiJhY2Nlc3NfdG9rZW4iLCJzY29wZXMiOiJ3aHIgd251dCB3cHJvIHdzbGUgd3dlaSB3c2V0IHdhY3Qgd294eSB3cmVzIHdsb2MiLCJleHAiOjE3NTY4NzQ4NTYsImlhdCI6MTc1Njg0NjA1Nn0.5xkjVPdqbEKmciQe3cQ-YK2h3JPmLxcIuHwYxJnm1Z0",
         "expires_in": 28800,
