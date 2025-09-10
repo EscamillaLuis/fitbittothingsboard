@@ -27,7 +27,7 @@ def mqtt_publish(host, port, token, payloads):
     client.loop_stop()
     client.disconnect()
 
-def generate_static_payload(data, usuario, use_current_ts: bool = False):
+def generate_static_payload(data, usuario):
     static_keys = [
         "Edad", "Peso", "Grasa_Corporal", "IMC",
         "Frecuencia_Respiratoria", "Ritmo_Cardiaco_Reposo",
@@ -45,7 +45,6 @@ def generate_static_payload(data, usuario, use_current_ts: bool = False):
             values[key] = int(num) if num.is_integer() else num
         except Exception:
             continue
-            
     sleep_list = data.get("Resumen_Sueño", [])
     if isinstance(sleep_list, list) and sleep_list:
         sleep = sleep_list[0]
@@ -73,14 +72,10 @@ def generate_static_payload(data, usuario, use_current_ts: bool = False):
             v = act.get(k)
             if isinstance(v, (int, float)):
                 values[k] = v
-                
     if len(values) <= 1:
         return None
     date_obj = datetime.datetime.strptime(data.get("Fecha"), "%Y-%m-%d").date()
-    if use_current_ts and data.get("Fecha") == datetime.date.today().strftime("%Y-%m-%d"):
-        ts = int(datetime.datetime.now().timestamp() * 1000)
-    else:
-        ts = int(datetime.datetime.combine(date_obj, datetime.time()).timestamp() * 1000)
+    ts = int(datetime.datetime.combine(date_obj, datetime.time()).timestamp() * 1000)
     return {"ts": ts, "values": values}
 
 def generate_time_series_payloads(data, window_seconds, usuario):
