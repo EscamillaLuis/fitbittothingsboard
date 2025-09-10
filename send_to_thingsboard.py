@@ -36,6 +36,17 @@ def generate_static_payload(data, usuario):
     values = {"Usuario": usuario}
     for key in static_keys:
         val = data.get(key)
+        
+        if key == "Distancia":
+            dataset = data.get("Actividades", {}).get("distance", [])
+            if isinstance(dataset, list):
+                total = sum(
+                    d.get("value", 0) for d in dataset
+                    if isinstance(d.get("value"), (int, float))
+                )
+                if total:
+                    val = total
+
         if isinstance(val, list) and val and isinstance(val[0], dict) and "value" in val[0]:
             raw = val[0]["value"]
         else:
