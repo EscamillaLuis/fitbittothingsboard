@@ -352,12 +352,29 @@ class FitbitApp:
             resumen_actividades = data.get('Resumen_Actividades', {}) or {}
             resumen_sueño = data.get('Resumen_Sueño', [{}])[0] if isinstance(data.get('Resumen_Sueño', []), list) else {}
             spo2_data = data.get('SpO2', []) if isinstance(data.get('SpO2', []), list) else []
-    
+
+            distancia_total = 0
+            if isinstance(resumen_actividades.get('distances'), list):
+                for d in resumen_actividades['distances']:
+                    val = d.get('distance')
+                    if isinstance(val, (int, float)):
+                        distancia_total = val
+                        break
+            if not distancia_total:
+                actividades = data.get('Actividades', {})
+                dist_dataset = actividades.get('distance', []) if isinstance(actividades, dict) else []
+                if isinstance(dist_dataset, list):
+                    distancia_total = sum(
+                        item.get('value', 0) for item in dist_dataset
+                        if isinstance(item.get('value'), (int, float))
+                    )
+
             df_data = {
             'Fecha': [data.get('Fecha', '')],
             'Hora': [datetime.now().strftime("%H:%M:%S")],
             'Pasos': [resumen_actividades.get('steps', 0)],
             'Calorias': [resumen_actividades.get('caloriesOut', 0)],
+            'Distancia (km)': [distancia_total],
             'Ritmo Cardiaco Reposo': [resumen_actividades.get('restingHeartRate', 'N/A')],
             'Minutos Activos': [resumen_actividades.get('veryActiveMinutes', 0)],
             'Sueño (min)': [resumen_sueño.get('minutesAsleep', 0)],
@@ -764,6 +781,23 @@ def get_fitbit_data(client_id: str, client_secret: str, date: str) -> Optional[D
         else:
             activities[resource] = "No disponible"
     
+    # Asegurar que la distancia total no sea cero
+    dist_val = result.get("Distancia")
+    if isinstance(dist_val, list) and dist_val:
+        try:
+            dist_val = float(dist_val[0].get("value", 0))
+        except Exception:
+            dist_val = 0
+    elif not isinstance(dist_val, (int, float)):
+        dist_val = 0
+    if not dist_val:
+        dist_dataset = activities.get("distance")
+        if isinstance(dist_dataset, list):
+            dist_val = sum(
+                item.get("value", 0) for item in dist_dataset
+                if isinstance(item.get("value"), (int, float))
+            )
+    result["Distancia"] = dist_val
     result["Actividades"] = activities
 
     return result
