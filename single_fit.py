@@ -44,6 +44,7 @@ DEFAULT_TIMEOUT = (5, 30)
 
 logger = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO)
+logging.getLogger('urllib3').setLevel(logging.WARNING)
 
 _conn_timings = threading.local()
 
@@ -121,7 +122,7 @@ def timed_request(session: requests.Session, method: str, url: str, headers: Dic
     host = urlparse(url).hostname
     family = "IPv6" if getattr(_conn_timings, 'family', socket.AF_INET) == socket.AF_INET6 else "IPv4"
     ips = getattr(_conn_timings, 'addrs', [])
-    logger.info(
+    logger.debug(
         "[%s] DNS %.3fms connect %.3fms TLS %.3fms TTFB %.3fms total %.3fms IPs %s family %s",
         host,
         (_conn_timings.dns or 0) * 1000,
