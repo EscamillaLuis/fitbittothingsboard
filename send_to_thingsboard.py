@@ -27,7 +27,24 @@ def mqtt_publish(host, port, token, payloads):
     client.loop_stop()
     client.disconnect()
 
-def generate_static_payload(data, usuario):
+def generate_static_payload(data, usuario, use_current_ts: bool = False):
+    """Build a telemetry payload with static daily metrics.
+
+    Parameters
+    ----------
+    data: dict
+        Fitbit data already retrieved for a particular day.
+    usuario: str
+        Identifier of the user, included in the telemetry values.
+    use_current_ts: bool
+        If True, the payload timestamp corresponds to the current
+        moment. This is useful for monitor mode where the script runs
+        several times during the day and we want each update to be
+        stored as a new time-series entry. When False (default), the
+        timestamp is set to midnight of ``data['Fecha']`` which is the
+        desired behaviour when processing historical data.
+    """
+    
     static_keys = [
         "Edad", "Peso", "Grasa_Corporal", "IMC",
         "Frecuencia_Respiratoria", "Ritmo_Cardiaco_Reposo",
@@ -45,6 +62,7 @@ def generate_static_payload(data, usuario):
             values[key] = int(num) if num.is_integer() else num
         except Exception:
             continue
+            
     sleep_list = data.get("Resumen_Sueño", [])
     if isinstance(sleep_list, list) and sleep_list:
         sleep = sleep_list[0]
@@ -72,10 +90,16 @@ def generate_static_payload(data, usuario):
             v = act.get(k)
             if isinstance(v, (int, float)):
                 values[k] = v
+                
     if len(values) <= 1:
         return None
-    date_obj = datetime.datetime.strptime(data.get("Fecha"), "%Y-%m-%d").date()
-    ts = int(datetime.datetime.combine(date_obj, datetime.time()).timestamp() * 1000)
+    
+    if use_current_ts:
+        ts = int(datetime.datetime.now().timestamp() * 1000)
+    else:
+        date_obj = datetime.datetime.strptime(data.get("Fecha"), "%Y-%m-%d").date()
+        ts = int(datetime.datetime.combine(date_obj, datetime.time()).timestamp() * 1000)
+
     return {"ts": ts, "values": values}
 
 def generate_time_series_payloads(data, window_seconds, usuario):
