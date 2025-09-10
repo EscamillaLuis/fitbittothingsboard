@@ -36,7 +36,6 @@ def generate_static_payload(data, usuario):
     values = {"Usuario": usuario}
     for key in static_keys:
         val = data.get(key)
-        
         if isinstance(val, list) and val and isinstance(val[0], dict) and "value" in val[0]:
             raw = val[0]["value"]
         else:
