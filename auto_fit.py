@@ -53,7 +53,7 @@ def parse_args():
     return parser.parse_args()
 
 
-def process_single_date(client_id, secret, tb_token, usuario, date_str, window):
+def process_single_date(client_id, secret, tb_token, usuario, date_str, window, monitor=False):
     print(f"📅 Procesando {client_id} - {date_str}")
     data = get_fitbit_data(client_id, secret, date_str)
     if not data:
@@ -89,7 +89,7 @@ def process_single_date(client_id, secret, tb_token, usuario, date_str, window):
             os.remove(flat_json)
 
     payloads = []
-    if (static := generate_static_payload(data, usuario)):
+    if (static := generate_static_payload(data, usuario, use_current_ts=monitor)):
         payloads.append(static)
     payloads.extend(generate_time_series_payloads(data, window, usuario))
 
@@ -120,7 +120,7 @@ def monitor_mode(client_ids, cred_map, tb_tokens, window, interval):
                 if not (secret and token and usuario):
                     print(f"⚠️ Credenciales faltantes para {client_id}")
                     continue
-                process_single_date(client_id, secret, token, usuario, today, window)
+                process_single_date(client_id, secret, token, usuario, today, window, monitor=True)
             print(f"⏳ Esperando {interval} segundos para siguiente monitoreo...")
             time.sleep(interval)
     except KeyboardInterrupt:
