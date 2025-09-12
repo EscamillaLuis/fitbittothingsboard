@@ -65,19 +65,34 @@ def generate_static_payload(data, usuario, use_current_ts: bool = False):
     
     resp_list = data.get("Frecuencia_Respiratoria", [])
     if isinstance(resp_list, list) and resp_list:
-        rate = resp_list[0].get("value", {}).get("fullSleepSummary", {}).get("breathingRate")
+        full = resp_list[0].get("value", {}).get("fullSleepSummary", {})
+        rate = full.get("breathingRate")
         if isinstance(rate, (int, float)):
             values["Frecuencia_Respiratoria"] = rate
+        for stage in full.get("breathingRateData", []):
+            lvl = stage.get("level")
+            br = stage.get("breathingRate")
+            if lvl in {"light", "deep", "rem"} and isinstance(br, (int, float)):
+                values[f"Frecuencia_Respiratoria_{lvl}"] = br
 
-    # HRV (promedio RMSSD)
+    # HRV summary or intraday
     hrv_list = data.get("HRV", [])
-    if isinstance(hrv_list, list):
+    if isinstance(hrv_list, list) and hrv_list:
+        entry = hrv_list[0]
+        value = entry.get("value", {})
+        daily = value.get("dailyRmssd")
+        deep = value.get("deepRmssd")
+        if isinstance(daily, (int, float)):
+            values["HRV_dailyRmssd"] = daily
+        if isinstance(deep, (int, float)):
+            values["HRV_deepRmssd"] = deep
         rmssd_vals = []
-        for entry in hrv_list:
-            for minute in entry.get("minutes", []):
-                rmssd = minute.get("value", {}).get("rmssd")
-                if isinstance(rmssd, (int, float)):
-                    rmssd_vals.append(rmssd)
+        for minute in entry.get("minutes", []):
+            rmssd = minute.get("value", {}).get("rmssd")
+            if isinstance(rmssd, (int, float)):
+                rmssd_vals.append(rmssd)
+        if rmssd_vals and "HRV_dailyRmssd" not in values:
+            values["HRV_RMSSD"] = sum(rmssd_vals) / len(rmssd_vals)
         if rmssd_vals:
             values["HRV_RMSSD"] = sum(rmssd_vals) / len(rmssd_vals)        
     sleep_list = data.get("Resumen_Sueño", [])
