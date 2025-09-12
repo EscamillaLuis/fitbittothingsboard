@@ -1,9 +1,9 @@
 {
     "23QFPB": {
-        "access_token": "eyJhbGciOiJIUzI1NiJ9.eyJhdWQiOiIyM1FGUEIiLCJzdWIiOiJDUEhCUTgiLCJpc3MiOiJGaXRiaXQiLCJ0eXAiOiJhY2Nlc3NfdG9rZW4iLCJzY29wZXMiOiJ3aHIgd251dCB3cHJvIHdzbGUgd3dlaSB3c2V0IHdhY3Qgd294eSB3cmVzIHdsb2MiLCJleHAiOjE3NTY4NzQ4NTYsImlhdCI6MTc1Njg0NjA1Nn0.5xkjVPdqbEKmciQe3cQ-YK2h3JPmLxcIuHwYxJnm1Z0",
+        "access_token": "eyJhbGciOiJIUzI1NiJ9.eyJhdWQiOiIyM1FGUEIiLCJzdWIiOiJDUEhCUTgiLCJpc3MiOiJGaXRiaXQiLCJ0eXAiOiJhY2Nlc3NfdG9rZW4iLCJzY29wZXMiOiJ3aHIgd251dCB3cHJvIHdzbGUgd3dlaSB3ZWNnIHdzZXQgd2FjdCB3b3h5IHdyZXMgd2xvYyIsImV4cCI6MTc1NzcyNjY0NiwiaWF0IjoxNzU3Njk3ODQ2fQ.qAJpDa82LaOmLh0vhwrLXJyjgwdHstkmjjIRj4B8ODI",
         "expires_in": 28800,
-        "refresh_token": "c2600fc2ea15cae61afc4d221b34cf9b3e08f9a237d65b12bec0aae9ef828fd5",
-        "scope": "sleep settings oxygen_saturation nutrition respiratory_rate activity heartrate profile weight location",
+        "refresh_token": "36a4df342576629838bb2a2f630461f5da37f7fb307cf393791b7462080c7f74",
+        "scope": "sleep settings oxygen_saturation nutrition respiratory_rate electrocardiogram activity heartrate profile weight location",
         "token_type": "Bearer",
         "user_id": "CPHBQ8"
     }
