@@ -62,7 +62,24 @@ def generate_static_payload(data, usuario, use_current_ts: bool = False):
             values[key] = int(num) if num.is_integer() else num
         except Exception:
             continue
-            
+    
+    resp_list = data.get("Frecuencia_Respiratoria", [])
+    if isinstance(resp_list, list) and resp_list:
+        rate = resp_list[0].get("value", {}).get("fullSleepSummary", {}).get("breathingRate")
+        if isinstance(rate, (int, float)):
+            values["Frecuencia_Respiratoria"] = rate
+
+    # HRV (promedio RMSSD)
+    hrv_list = data.get("HRV", [])
+    if isinstance(hrv_list, list):
+        rmssd_vals = []
+        for entry in hrv_list:
+            for minute in entry.get("minutes", []):
+                rmssd = minute.get("value", {}).get("rmssd")
+                if isinstance(rmssd, (int, float)):
+                    rmssd_vals.append(rmssd)
+        if rmssd_vals:
+            values["HRV_RMSSD"] = sum(rmssd_vals) / len(rmssd_vals)        
     sleep_list = data.get("Resumen_Sueño", [])
     if isinstance(sleep_list, list) and sleep_list:
         sleep = sleep_list[0]
@@ -116,7 +133,20 @@ def generate_time_series_payloads(data, window_seconds, usuario):
             seconds = tm.hour * 3600 + tm.minute * 60 + tm.second
             idx = seconds // window_seconds
             buckets.setdefault(idx, {}).setdefault("Ritmo_Cardiaco", []).append(v)
-
+            
+    hrv_list = data.get("HRV", [])
+    if isinstance(hrv_list, list):
+        for entry in hrv_list:
+            for minute in entry.get("minutes", []):
+                minute_ts = minute.get("minute")
+                rmssd = minute.get("value", {}).get("rmssd")
+                if not minute_ts or not isinstance(rmssd, (int, float)):
+                    continue
+                dt = datetime.datetime.fromisoformat(minute_ts)
+                seconds = dt.hour * 3600 + dt.minute * 60 + dt.second
+                idx = seconds // window_seconds
+                buckets.setdefault(idx, {}).setdefault("HRV_RMSSD", []).append(rmssd)
+                
     actividades = data.get("Actividades", {})
     if isinstance(actividades, dict) and isinstance(actividades.get("steps"), list):
         for entry in actividades["steps"]:
