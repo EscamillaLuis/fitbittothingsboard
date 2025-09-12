@@ -75,7 +75,7 @@ def generate_static_payload(data, usuario, use_current_ts: bool = False):
             if lvl in {"light", "deep", "rem"} and isinstance(br, (int, float)):
                 values[f"Frecuencia_Respiratoria_{lvl}"] = br
 
-    # HRV summary or intraday
+    # HRV summary
     hrv_list = data.get("HRV", [])
     if isinstance(hrv_list, list) and hrv_list:
         entry = hrv_list[0]
@@ -86,15 +86,24 @@ def generate_static_payload(data, usuario, use_current_ts: bool = False):
             values["HRV_dailyRmssd"] = daily
         if isinstance(deep, (int, float)):
             values["HRV_deepRmssd"] = deep
-        rmssd_vals = []
-        for minute in entry.get("minutes", []):
-            rmssd = minute.get("value", {}).get("rmssd")
-            if isinstance(rmssd, (int, float)):
-                rmssd_vals.append(rmssd)
-        if rmssd_vals and "HRV_dailyRmssd" not in values:
-            values["HRV_RMSSD"] = sum(rmssd_vals) / len(rmssd_vals)
+        
+    intraday = data.get("HRV_intraday")
+    if isinstance(intraday, dict):
+        mins = intraday.get("minutes", [])
+        rmssd_vals = [m.get("rmssd") for m in mins if isinstance(m.get("rmssd"), (int, float))]
+        cov_vals = [m.get("coverage") for m in mins if isinstance(m.get("coverage"), (int, float))]
+        lf_vals = [m.get("lf") for m in mins if isinstance(m.get("lf"), (int, float))]
+        hf_vals = [m.get("hf") for m in mins if isinstance(m.get("hf"), (int, float))]
         if rmssd_vals:
-            values["HRV_RMSSD"] = sum(rmssd_vals) / len(rmssd_vals)        
+            values["HRV_intraday_rmssd_mean"] = sum(rmssd_vals) / len(rmssd_vals)
+        if cov_vals:
+            values["HRV_intraday_coverage_mean"] = sum(cov_vals) / len(cov_vals)
+        if lf_vals:
+            lf_sorted = sorted(lf_vals)
+            values["HRV_intraday_lf_median"] = lf_sorted[len(lf_sorted)//2]
+        if hf_vals:
+            hf_sorted = sorted(hf_vals)
+            values["HRV_intraday_hf_median"] = hf_sorted[len(hf_sorted)//2]        
     sleep_list = data.get("Resumen_Sueño", [])
     if isinstance(sleep_list, list) and sleep_list:
         sleep = sleep_list[0]
@@ -149,18 +158,26 @@ def generate_time_series_payloads(data, window_seconds, usuario):
             idx = seconds // window_seconds
             buckets.setdefault(idx, {}).setdefault("Ritmo_Cardiaco", []).append(v)
             
-    hrv_list = data.get("HRV", [])
-    if isinstance(hrv_list, list):
-        for entry in hrv_list:
-            for minute in entry.get("minutes", []):
-                minute_ts = minute.get("minute")
-                rmssd = minute.get("value", {}).get("rmssd")
-                if not minute_ts or not isinstance(rmssd, (int, float)):
-                    continue
-                dt = datetime.datetime.fromisoformat(minute_ts)
-                seconds = dt.hour * 3600 + dt.minute * 60 + dt.second
-                idx = seconds // window_seconds
-                buckets.setdefault(idx, {}).setdefault("HRV_RMSSD", []).append(rmssd)
+    hrv_minutes = []
+    intraday = data.get("HRV_intraday")
+    if isinstance(intraday, dict):
+        hrv_minutes = intraday.get("minutes", [])
+    else:
+        hrv_list = data.get("HRV", [])
+        if isinstance(hrv_list, list):
+            for entry in hrv_list:
+                for minute in entry.get("minutes", []):
+                    val = minute.get("value", {})
+                    hrv_minutes.append({"time": minute.get("minute"), "rmssd": val.get("rmssd")})
+    for minute in hrv_minutes:
+        minute_ts = minute.get("time")
+        rmssd = minute.get("rmssd")
+        if not minute_ts or not isinstance(rmssd, (int, float)):
+            continue
+        dt = datetime.datetime.fromisoformat(minute_ts)
+        seconds = dt.hour * 3600 + dt.minute * 60 + dt.second
+        idx = seconds // window_seconds
+        buckets.setdefault(idx, {}).setdefault("HRV_RMSSD", []).append(rmssd)
                 
     actividades = data.get("Actividades", {})
     if isinstance(actividades, dict) and isinstance(actividades.get("steps"), list):
