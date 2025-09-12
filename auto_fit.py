@@ -5,7 +5,13 @@ import shutil
 import time
 from datetime import datetime, timedelta
 
-from single_fit import get_fitbit_data, export_json_to_excel_single
+from single_fit import (
+    get_fitbit_data,
+    export_json_to_excel_single,
+    debug_print_token_scopes,
+    fetch_hrv_data,
+    fetch_br_data,
+)
 from send_to_thingsboard import (
     generate_static_payload,
     generate_time_series_payloads,
@@ -28,30 +34,35 @@ def load_json(path):
 
 def parse_args():
     parser = argparse.ArgumentParser(
-        description="Automatiza descarga y envío de datos Fitbit para múltiples pulseras"
+        description="Automatiza descarga y envío de datos Fitbit para múltiples pulseras",
     )
     parser.add_argument(
         "--start-date", type=str,
-        help="Fecha inicio (YYYY-MM-DD). Por defecto hoy"
+        help="Fecha inicio (YYYY-MM-DD). Por defecto hoy",
     )
     parser.add_argument(
         "--end-date", type=str,
-        help="Fecha fin (YYYY-MM-DD). Por defecto start-date"
+        help="Fecha fin (YYYY-MM-DD). Por defecto start-date",
     )
     parser.add_argument(
         "--window", type=int, default=DEFAULT_WINDOW,
-        help="Ventana de agregación (segundos) para series temporales"
+        help="Ventana de agregación (segundos) para series temporales",
     )
     parser.add_argument(
         "--monitor", action="store_true",
-        help="Activar monitoreo horario continuo (solo fecha actual)"
+        help="Activar monitoreo horario continuo (solo fecha actual)",
     )
     parser.add_argument(
         "--interval", type=int, default=DEFAULT_INTERVAL,
-        help="Intervalo en segundos entre cada lote de descarga o monitoreo"
+        help="Intervalo en segundos entre cada lote de descarga o monitoreo",
     )
+    parser.add_argument("--check-scopes", type=str, help="Imprime los scopes del token para el usuario dado")
+    parser.add_argument("--fetch-hrv", action="store_true", help="Descarga HRV para un usuario")
+    parser.add_argument("--fetch-br", action="store_true", help="Descarga tasa respiratoria para un usuario")
+    parser.add_argument("--date", type=str, help="Fecha para --fetch-hrv/--fetch-br")
+    parser.add_argument("--intraday", action="store_true", help="Usar endpoint intradía en pruebas")
+    parser.add_argument("--user", type=str, help="Usuario para comandos de prueba")
     return parser.parse_args()
-
 
 def process_single_date(client_id, secret, tb_token, usuario, date_str, window, monitor=False):
     print(f"📅 Procesando {client_id} - {date_str}")
@@ -129,6 +140,28 @@ def monitor_mode(client_ids, cred_map, tb_tokens, window, interval):
 
 def main():
     args = parse_args()
+    
+    if args.check_scopes:
+        debug_print_token_scopes(args.check_scopes)
+        return
+
+    if args.fetch_hrv or args.fetch_br:
+        if not (args.user and args.date):
+            raise ValueError("Debe indicar --user y --date")
+        creds = load_json(CREDENTIALS_FILE)
+        cred_map = {c['client_id']: c['client_secret'] for c in creds}
+        secret = cred_map.get(args.user)
+        if not secret:
+            print(f"No se encontraron credenciales para {args.user}")
+            return
+        if args.fetch_hrv:
+            data = fetch_hrv_data(args.user, secret, args.date, intraday=args.intraday)
+            print(json.dumps(data, indent=2) if data else "Sin datos")
+        if args.fetch_br:
+            data = fetch_br_data(args.user, secret, args.date, intraday=args.intraday)
+            print(json.dumps(data, indent=2) if data else "Sin datos")
+        return
+
     today = datetime.now().date()
     start = datetime.strptime(args.start_date, "%Y-%m-%d").date() if args.start_date else today
     end = datetime.strptime(args.end_date, "%Y-%m-%d").date() if args.end_date else start
@@ -145,13 +178,11 @@ def main():
     if args.monitor:
         monitor_mode(client_ids, cred_map, tb_tokens, args.window, args.interval)
     else:
-        # Lista de fechas completas
         dates = []
         d = start
         while d <= end:
             dates.append(d.strftime("%Y-%m-%d"))
             d += timedelta(days=1)
-        # Procesar en lotes de 5 días con pausa
         for i in range(0, len(dates), CHUNK_SIZE):
             batch = dates[i:i+CHUNK_SIZE]
             print(f"🔄 Procesando lote de días: {batch}")
@@ -164,7 +195,6 @@ def main():
                         print(f"⚠️ Credenciales faltantes para {client_id} en {date_str}")
                         continue
                     process_single_date(client_id, secret, token, usuario, date_str, args.window)
-            # Pausa entre lotes
             if i + CHUNK_SIZE < len(dates):
                 print(f"⏳ Pausando {args.interval} segundos antes del siguiente lote...")
                 time.sleep(args.interval)
