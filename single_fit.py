@@ -42,6 +42,18 @@ AGG_WINDOW_SECONDS = 60
 
 DEFAULT_TIMEOUT = (5, 30)
 
+REQUIRED_SCOPES = {
+    "activity",
+    "heartrate",
+    "sleep",
+    "profile",
+    "settings",
+    "weight",
+    "respiratory_rate",
+    "electrocardiogram",
+    "oxygen_saturation",
+}
+
 logger = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO)
 logging.getLogger('urllib3').setLevel(logging.WARNING)
@@ -595,19 +607,36 @@ def check_scopes(client_id: str):
         return False
         
     current_scopes = set(token_data.get("scope", "").split())
-    required_scopes = {
-        "activity",
-        "heartrate",
-        "sleep",
-        "profile",
-        "settings",
-        "weight",
-        "respiratory_rate",
-        "electrocardiogram",
-        "oxygen_saturation",
-    }
-    return required_scopes.issubset(current_scopes)
+    return REQUIRED_SCOPES.issubset(current_scopes)
+    
 
+def reauthenticate_scopes(client_id: str, client_secret: str) -> Optional[str]:
+    print(f"Iniciando reautenticación para {client_id} con scopes completos...")
+    fitbit_session = OAuth2Session(
+        client_id,
+        redirect_uri=REDIRECT_URI,
+        scope=list(REQUIRED_SCOPES),
+    )
+    authorization_url, _ = fitbit_session.authorization_url("https://www.fitbit.com/oauth2/authorize")
+    print("Abre la siguiente URL en tu navegador y autoriza el acceso:")
+    print(authorization_url)
+    webbrowser.open(authorization_url)
+    redirect_response = input(
+        "Después de autorizar, pega aquí la URL completa de redirección:\n"
+    ).strip()
+    try:
+        token = fitbit_session.fetch_token(
+            TOKEN_URL,
+            client_secret=client_secret,
+            authorization_response=redirect_response,
+        )
+    except Exception as e:
+        print(f"Error durante la reautenticación: {e}")
+        return None
+    save_token(client_id, token)
+    print(f"Nuevo token guardado para {client_id}")
+    return token.get("access_token")
+    
 def refresh_access_token(client_id: str, client_secret: str) -> Optional[str]:
     tokens = load_tokens()
     token_data = tokens.get(client_id)
@@ -629,21 +658,10 @@ def refresh_access_token(client_id: str, client_secret: str) -> Optional[str]:
         current_scopes = set(scope_value.split())
         scope_str = scope_value
 
-    required_scopes = {
-        "activity",
-        "heartrate",
-        "sleep",
-        "profile",
-        "settings",
-        "weight",
-        "respiratory_rate",
-        "electrocardiogram",
-        "oxygen_saturation",
-    }
-    if not required_scopes.issubset(current_scopes):
-        missing_scopes = required_scopes - current_scopes
+    if not REQUIRED_SCOPES.issubset(current_scopes):
+        missing_scopes = REQUIRED_SCOPES - current_scopes
         print(f"Error: Faltan scopes esenciales para {client_id}: {missing_scopes}")
-        return None
+        return reauthenticate_scopes(client_id, client_secret)
 
     auth_header = b64encode(f"{client_id}:{client_secret}".encode()).decode()
     headers = {
@@ -654,7 +672,7 @@ def refresh_access_token(client_id: str, client_secret: str) -> Optional[str]:
     data = {
         "grant_type": "refresh_token",
         "refresh_token": refresh_token,
-        "scope": scope_str or "activity heartrate oxygen_saturation respiratory_rate sleep settings weight"
+        "scope": scope_str or "activity heartrate oxygen_saturation respiratory_rate electrocardiogram sleep settings weight"
     }
 
     try:
