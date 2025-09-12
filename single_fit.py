@@ -595,7 +595,16 @@ def check_scopes(client_id: str):
         return False
         
     current_scopes = set(token_data.get("scope", "").split())
-    required_scopes = {"activity", "heartrate", "sleep", "profile", "settings", "weight"}
+    required_scopes = {
+        "activity",
+        "heartrate",
+        "sleep",
+        "profile",
+        "settings",
+        "weight",
+        "respiratory_rate",
+        "oxygen_saturation",
+    }
     return required_scopes.issubset(current_scopes)
 
 def refresh_access_token(client_id: str, client_secret: str) -> Optional[str]:
@@ -619,7 +628,16 @@ def refresh_access_token(client_id: str, client_secret: str) -> Optional[str]:
         current_scopes = set(scope_value.split())
         scope_str = scope_value
 
-    required_scopes = {"activity", "heartrate", "sleep", "profile", "settings", "weight"}
+    required_scopes = {
+        "activity",
+        "heartrate",
+        "sleep",
+        "profile",
+        "settings",
+        "weight",
+        "respiratory_rate",
+        "oxygen_saturation",
+    }
     if not required_scopes.issubset(current_scopes):
         missing_scopes = required_scopes - current_scopes
         print(f"Error: Faltan scopes esenciales para {client_id}: {missing_scopes}")
