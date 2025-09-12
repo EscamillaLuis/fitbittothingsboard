@@ -911,7 +911,8 @@ def get_fitbit_data(client_id: str, client_secret: str, date: str) -> Optional[D
         return None, response.status_code
 
     # 1. Perfil de usuario
-    if profile := api_request("https://api.fitbit.com/1/user/-/profile.json", "user"):
+    profile, _ = api_request("https://api.fitbit.com/1/user/-/profile.json", "user")
+    if profile:
         result.update({
             "ID_Usuario": profile.get("encodedId"),
             "Nombre": profile.get("fullName"),
