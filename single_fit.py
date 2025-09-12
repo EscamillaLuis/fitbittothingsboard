@@ -622,8 +622,12 @@ def check_scopes(client_id: str):
     token_data = tokens.get(client_id)
     if not token_data:
         return False
-        
-    current_scopes = set(token_data.get("scope", "").split())
+    
+    scope_value = token_data.get("scope", "")
+    if isinstance(scope_value, list):
+        current_scopes = set(scope_value)
+    else:
+        current_scopes = set(scope_value.split())
     return REQUIRED_SCOPES.issubset(current_scopes)
     
 
