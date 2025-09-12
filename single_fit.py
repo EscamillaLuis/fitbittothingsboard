@@ -456,8 +456,8 @@ class FitbitApp:
                 fitbit_session = OAuth2Session(
                     self.client_id.get(), 
                     redirect_uri=REDIRECT_URI, 
-                    scope=["activity", "heartrate", "sleep", "profile", "oxygen_saturation", 
-                          "respiratory_rate", "settings", "weight", "nutrition", "location"]
+                    scope=["activity", "heartrate", "sleep", "profile", "oxygen_saturation",
+                          "respiratory_rate", "electrocardiogram", "settings", "weight", "nutrition", "location"]
                 )
                 authorization_url, _ = fitbit_session.authorization_url("https://www.fitbit.com/oauth2/authorize")
                 webbrowser.open(authorization_url)
@@ -469,8 +469,8 @@ class FitbitApp:
                     fitbit_session = OAuth2Session(
                         self.client_id.get(), 
                         redirect_uri=REDIRECT_URI,
-                        scope=["activity", "heartrate", "sleep", "profile", "oxygen_saturation", 
-                              "respiratory_rate", "settings", "weight", "nutrition", "location"]
+                        scope=["activity", "heartrate", "sleep", "profile", "oxygen_saturation",
+                              "respiratory_rate", "electrocardiogram", "settings", "weight", "nutrition", "location"]
                     )
                     token = fitbit_session.fetch_token(
                         TOKEN_URL,
@@ -603,6 +603,7 @@ def check_scopes(client_id: str):
         "settings",
         "weight",
         "respiratory_rate",
+        "electrocardiogram",
         "oxygen_saturation",
     }
     return required_scopes.issubset(current_scopes)
@@ -636,6 +637,7 @@ def refresh_access_token(client_id: str, client_secret: str) -> Optional[str]:
         "settings",
         "weight",
         "respiratory_rate",
+        "electrocardiogram",
         "oxygen_saturation",
     }
     if not required_scopes.issubset(current_scopes):
