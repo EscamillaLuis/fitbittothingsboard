@@ -1239,13 +1239,35 @@ def create_heart_rate_summary_sheet(writer, data, date):
 
 def create_biometrics_sheet(writer, data, date):
     """Crea hoja con datos biométricos"""
+    resp_rate = None
+    resp_list = data.get("Frecuencia_Respiratoria", [])
+    if isinstance(resp_list, list) and resp_list:
+        resp_rate = resp_list[0].get("value", {}).get("fullSleepSummary", {}).get("breathingRate")
+
+    hrv_avg = None
+    hrv_list = data.get("HRV", [])
+    if isinstance(hrv_list, list):
+        rmssd_vals = []
+        for entry in hrv_list:
+            for minute in entry.get("minutes", []):
+                rmssd = minute.get("value", {}).get("rmssd")
+                if isinstance(rmssd, (int, float)):
+                    rmssd_vals.append(rmssd)
+        if rmssd_vals:
+            hrv_avg = sum(rmssd_vals) / len(rmssd_vals)
     biometrics = {
-        "Campo": ["Peso", "Grasa Corporal", "IMC", "Ritmo Cardíaco en Reposo"],
+        "Campo": [
+            "Peso", "Grasa Corporal", "IMC",
+            "Ritmo Cardíaco en Reposo", "Frecuencia Respiratoria",
+            "HRV RMSSD Promedio"
+        ],
         "Valor": [
             data.get("Peso", "No disponible"),
             data.get("Grasa_Corporal", "No disponible"),
             data.get("IMC", "No disponible"),
-            data.get("Ritmo_Cardiaco_Reposo", "No disponible")
+            data.get("Ritmo_Cardiaco_Reposo", "No disponible"),
+            resp_rate if resp_rate is not None else "No disponible",
+            hrv_avg if hrv_avg is not None else "No disponible"
         ]
     }
     df_biometrics = pd.DataFrame(biometrics)
