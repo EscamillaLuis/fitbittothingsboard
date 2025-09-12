@@ -14,6 +14,7 @@ from urllib3.util import ssl_ as urllib3_ssl
 import certifi
 from base64 import b64encode
 from datetime import datetime, timedelta
+from zoneinfo import ZoneInfo
 from typing import Optional, Dict, List, Tuple
 import pandas as pd
 import tkinter as tk
@@ -631,6 +632,17 @@ def check_scopes(client_id: str):
     return REQUIRED_SCOPES.issubset(current_scopes)
     
 
+def token_has_scope(client_id: str, scope: str) -> bool:
+    """Return True if stored token for ``client_id`` includes ``scope``."""
+    tokens = load_tokens()
+    token_data = tokens.get(client_id, {})
+    scope_value = token_data.get("scope", "")
+    if isinstance(scope_value, list):
+        current_scopes = set(scope_value)
+    else:
+        current_scopes = set(scope_value.split())
+    return scope in current_scopes
+
 def reauthenticate_scopes(client_id: str, client_secret: str) -> Optional[str]:
     print(f"Iniciando reautenticación para {client_id} con scopes completos...")
     fitbit_session = OAuth2Session(
@@ -802,7 +814,138 @@ def _api_request_with_retry(session: requests.Session, headers: Dict, url: str,
         return None, resp.status_code
     return None, resp.status_code
 
+    
 
+_HRV_INTRADAY_CAP_CACHE: Dict[str, bool] = {}
+
+
+def check_hrv_intraday_capability(client_id: str, session: requests.Session, headers: Dict) -> bool:
+    """Check once whether intraday HRV endpoint is enabled for ``client_id``."""
+    if client_id in _HRV_INTRADAY_CAP_CACHE:
+        return _HRV_INTRADAY_CAP_CACHE[client_id]
+    test_date = datetime.now().strftime("%Y-%m-%d")
+    url = f"https://api.fitbit.com/1/user/-/hrv/date/{test_date}/all.json"
+    try:
+        resp = session.get(url, headers=headers, timeout=DEFAULT_TIMEOUT)
+    except Exception as e:
+        print(f"Error verificando HRV intradía: {e}")
+        _HRV_INTRADAY_CAP_CACHE[client_id] = False
+        return False
+    if resp.status_code == 200:
+        _HRV_INTRADAY_CAP_CACHE[client_id] = True
+        return True
+    if resp.status_code in (403, 404):
+        print("HRV intradía no habilitado para esta app/usuario. Se entregará sólo resumen (dailyRmssd, deepRmssd).")
+    elif resp.status_code == 401:
+        print("Token inválido al verificar HRV intradía.")
+    else:
+        print(f"No se pudo verificar HRV intradía: {resp.status_code}")
+    _HRV_INTRADAY_CAP_CACHE[client_id] = False
+    return False
+
+
+def _parse_hrv_minutes(raw_minutes: List[Dict]) -> List[Dict]:
+    tz = ZoneInfo("America/Mexico_City")
+    minutes = []
+    for entry in raw_minutes or []:
+        minute_ts = entry.get("minute")
+        val = entry.get("value", {})
+        if not minute_ts:
+            continue
+        try:
+            dt = datetime.fromisoformat(minute_ts).replace(tzinfo=tz)
+            minutes.append({
+                "time": dt.isoformat(),
+                "rmssd": val.get("rmssd"),
+                "coverage": val.get("coverage"),
+                "lf": val.get("lf"),
+                "hf": val.get("hf"),
+            })
+        except Exception:
+            continue
+    return minutes
+
+
+def fetch_hrv_intraday(client_id: str, client_secret: str, date: str,
+                       session: requests.Session = None) -> Optional[Dict]:
+    """Fetch intraday HRV for ``date`` if capability and scope allow it."""
+    token = refresh_access_token(client_id, client_secret)
+    if not token:
+        return None
+    if not token_has_scope(client_id, "heartrate"):
+        print("Token sin scope heartrate. Re-autenticar con dicho scope.")
+        return None
+    session = session or create_session()
+    headers = {"Authorization": f"Bearer {token}"}
+    if not check_hrv_intraday_capability(client_id, session, headers):
+        return None
+    url = f"https://api.fitbit.com/1/user/-/hrv/date/{date}/all.json"
+    backoff = 1
+    for attempt in range(3):
+        try:
+            resp = session.get(url, headers=headers, timeout=DEFAULT_TIMEOUT)
+        except Exception as e:
+            print(f"Error en petición HRV intradía: {e}")
+            return None
+        if resp.status_code == 200:
+            data = resp.json().get("hrv", [])
+            if not data:
+                return None
+            minutes = _parse_hrv_minutes(data[0].get("minutes", []))
+            return {"date": data[0].get("dateTime"), "minutes": minutes}
+        if resp.status_code == 401 and attempt == 0:
+            new_token = refresh_access_token(client_id, client_secret)
+            if not new_token:
+                return None
+            headers["Authorization"] = f"Bearer {new_token}"
+            continue
+        if resp.status_code == 429:
+            retry_after = int(resp.headers.get("Retry-After", "1"))
+            wait = max(retry_after, backoff)
+            print(f"Rate limit alcanzado. Reintentando en {wait}s")
+            time.sleep(wait)
+            backoff *= 2
+            continue
+        if resp.status_code >= 500:
+            wait = backoff
+            print(f"Error {resp.status_code} en HRV intradía. Reintento en {wait}s")
+            time.sleep(wait)
+            backoff *= 2
+            continue
+        if resp.status_code in (403, 404):
+            print("HRV intradía no habilitado para esta app/usuario. Se entregará sólo resumen (dailyRmssd, deepRmssd).")
+            return None
+        print(f"Error al obtener HRV intradía: {resp.status_code}")
+        return None
+    return None
+
+
+def fetch_hrv_intraday_range(client_id: str, client_secret: str,
+                              start_date: str, end_date: str) -> Optional[List[Dict]]:
+    """Fetch intraday HRV for an interval of days."""
+    token = refresh_access_token(client_id, client_secret)
+    if not token_has_scope(client_id, "heartrate"):
+        print("Token sin scope heartrate. Re-autenticar con dicho scope.")
+        return None
+    session = create_session()
+    headers = {"Authorization": f"Bearer {token}"}
+    if not check_hrv_intraday_capability(client_id, session, headers):
+        return None
+    url = f"https://api.fitbit.com/1/user/-/hrv/date/{start_date}/{end_date}/all.json"
+    try:
+        resp = session.get(url, headers=headers, timeout=DEFAULT_TIMEOUT)
+    except Exception as e:
+        print(f"Error en petición HRV intradía rango: {e}")
+        return None
+    if resp.status_code != 200:
+        print(f"Error al obtener HRV intradía rango: {resp.status_code}")
+        return None
+    raw = resp.json().get("hrv", [])
+    result = []
+    for day in raw:
+        minutes = _parse_hrv_minutes(day.get("minutes", []))
+        result.append({"date": day.get("dateTime"), "minutes": minutes})
+    return result
 def fetch_hrv_data(client_id: str, client_secret: str, date: str, intraday: bool = None) -> Optional[Dict]:
     if intraday is None:
         intraday = USE_INTRADAY
@@ -967,7 +1110,10 @@ def get_fitbit_data(client_id: str, client_secret: str, date: str) -> Optional[D
         ]
 
     # Datos de HRV y BR con manejo de intradía/summary
-    result["HRV"] = fetch_hrv_data(client_id, client_secret, date)
+    result["HRV"] = fetch_hrv_data(client_id, client_secret, date, intraday=False)
+    hrv_intraday = fetch_hrv_intraday(client_id, client_secret, date)
+    if hrv_intraday:
+        result["HRV_intraday"] = hrv_intraday
     result["Frecuencia_Respiratoria"] = fetch_br_data(client_id, client_secret, date)
 
     # Combinar todos los endpoints restantes
