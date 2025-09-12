@@ -11,6 +11,8 @@ from single_fit import (
     debug_print_token_scopes,
     fetch_hrv_data,
     fetch_br_data,
+    fetch_hrv_intraday,
+    fetch_hrv_intraday_range,
 )
 from send_to_thingsboard import (
     generate_static_payload,
@@ -60,6 +62,7 @@ def parse_args():
     parser.add_argument("--fetch-hrv", action="store_true", help="Descarga HRV para un usuario")
     parser.add_argument("--fetch-br", action="store_true", help="Descarga tasa respiratoria para un usuario")
     parser.add_argument("--date", type=str, help="Fecha para --fetch-hrv/--fetch-br")
+    parser.add_argument("--dates", type=str, help="Rango YYYY-MM-DD:YYYY-MM-DD para backfill HRV intradía")
     parser.add_argument("--intraday", action="store_true", help="Usar endpoint intradía en pruebas")
     parser.add_argument("--user", type=str, help="Usuario para comandos de prueba")
     return parser.parse_args()
@@ -146,8 +149,8 @@ def main():
         return
 
     if args.fetch_hrv or args.fetch_br:
-        if not (args.user and args.date):
-            raise ValueError("Debe indicar --user y --date")
+        if not args.user:
+            raise ValueError("Debe indicar --user")
         creds = load_json(CREDENTIALS_FILE)
         cred_map = {c['client_id']: c['client_secret'] for c in creds}
         secret = cred_map.get(args.user)
@@ -155,9 +158,22 @@ def main():
             print(f"No se encontraron credenciales para {args.user}")
             return
         if args.fetch_hrv:
-            data = fetch_hrv_data(args.user, secret, args.date, intraday=args.intraday)
+            if args.intraday:
+                if args.dates:
+                    start_d, end_d = args.dates.split(":")
+                    data = fetch_hrv_intraday_range(args.user, secret, start_d, end_d)
+                else:
+                    if not args.date:
+                        raise ValueError("Debe indicar --date o --dates")
+                    data = fetch_hrv_intraday(args.user, secret, args.date)
+            else:
+                if not args.date:
+                    raise ValueError("Debe indicar --date")
+                data = fetch_hrv_data(args.user, secret, args.date, intraday=False)
             print(json.dumps(data, indent=2) if data else "Sin datos")
         if args.fetch_br:
+            if not args.date:
+                raise ValueError("Debe indicar --date para --fetch-br")
             data = fetch_br_data(args.user, secret, args.date, intraday=args.intraday)
             print(json.dumps(data, indent=2) if data else "Sin datos")
         return
