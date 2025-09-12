@@ -9,7 +9,7 @@ import logging
 from urllib.parse import urlparse
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
-from urllib3.util import connection as urllib3_connection
+from urllib3.util import connection  as urllib3_connection
 from urllib3.util import ssl_ as urllib3_ssl
 import certifi
 from base64 import b64encode
