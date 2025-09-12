@@ -14,7 +14,7 @@ from urllib3.util import ssl_ as urllib3_ssl
 import certifi
 from base64 import b64encode
 from datetime import datetime, timedelta
-from typing import Optional, Dict, List
+from typing import Optional, Dict, List, Tuple
 import pandas as pd
 import tkinter as tk
 from tkinter import ttk, messagebox
@@ -53,6 +53,21 @@ REQUIRED_SCOPES = {
     "electrocardiogram",
     "oxygen_saturation",
 }
+
+# Scopes used during the OAuth authorization flow.  Fitbit requires
+# explicit permission for each type of data we plan to access.
+OAUTH_SCOPES = [
+    "activity",
+    "heartrate",
+    "respiratory_rate",
+    "sleep",
+    "profile",
+]
+
+# Flag to determine whether the application should request intraday
+# endpoints for HRV/BR.  If ``USE_INTRADAY`` is not set or is "false",
+# the less permission-demanding summary endpoints are used instead.
+USE_INTRADAY = os.getenv("USE_INTRADAY", "false").lower() == "true"
 
 logger = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO)
@@ -466,12 +481,13 @@ class FitbitApp:
                 save_credentials(self.client_id.get(), self.client_secret.get())
                 self.save_client_id(self.client_id.get())  # Guardar el client_id
                 fitbit_session = OAuth2Session(
-                    self.client_id.get(), 
-                    redirect_uri=REDIRECT_URI, 
-                    scope=["activity", "heartrate", "sleep", "profile", "oxygen_saturation",
-                          "respiratory_rate", "electrocardiogram", "settings", "weight", "nutrition", "location"]
+                    self.client_id.get(),
+                    redirect_uri=REDIRECT_URI,
+                    scope=OAUTH_SCOPES
                 )
-                authorization_url, _ = fitbit_session.authorization_url("https://www.fitbit.com/oauth2/authorize")
+                authorization_url, _ = fitbit_session.authorization_url(
+                    "https://www.fitbit.com/oauth2/authorize"
+                )
                 webbrowser.open(authorization_url)
                 return "Redirigiendo a Fitbit para autenticación..."
             
@@ -479,10 +495,9 @@ class FitbitApp:
             def callback():
                 try:
                     fitbit_session = OAuth2Session(
-                        self.client_id.get(), 
+                        self.client_id.get(),
                         redirect_uri=REDIRECT_URI,
-                        scope=["activity", "heartrate", "sleep", "profile", "oxygen_saturation",
-                              "respiratory_rate", "electrocardiogram", "settings", "weight", "nutrition", "location"]
+                        scope=OAUTH_SCOPES
                     )
                     token = fitbit_session.fetch_token(
                         TOKEN_URL,
@@ -492,8 +507,10 @@ class FitbitApp:
                     
                     save_token(self.client_id.get(), token)
                     session["client_id"] = self.client_id.get()
-                    
-                    self.log_message("\nAutenticación exitosa!")
+
+                    scopes = token.get("scope", "")
+                    self.log_message("Flujo OAuth: Authorization Code")
+                    self.log_message(f"Scopes concedidos: {scopes}")
                     self.status.set("Estado: Autenticado - Puede descargar datos")
                     
                     return """
@@ -698,6 +715,156 @@ def refresh_access_token(client_id: str, client_secret: str) -> Optional[str]:
         print(f"Error de conexión: {e}")
         return None
 
+
+def debug_print_token_scopes(user_id: str):
+    """Print the scopes associated with the stored access token for ``user_id``.
+
+    This function calls Fitbit's introspect endpoint to verify which scopes
+    were granted to the current access token.  It is useful during debugging
+    to ensure that the application has permission to query specific
+    resources such as heart rate variability or breathing rate.
+    """
+    tokens = load_tokens()
+    token_data = tokens.get(user_id)
+    if not token_data:
+        print(f"No se encontró token para {user_id}")
+        return
+
+    try:
+        with open(CREDENTIALS_FILE, "r", encoding="utf-8") as f:
+            creds = {c["client_id"]: c["client_secret"] for c in json.load(f)}
+    except Exception as e:
+        print(f"Error cargando credenciales: {e}")
+        return
+
+    client_secret = creds.get(user_id)
+    if not client_secret:
+        print(f"No se encontró client_secret para {user_id}")
+        return
+
+    session = create_session()
+    auth_header = b64encode(f"{user_id}:{client_secret}".encode()).decode()
+    headers = {"Authorization": f"Basic {auth_header}",
+               "Content-Type": "application/x-www-form-urlencoded"}
+    data = {"token": token_data.get("access_token", "")}
+
+    # Introspect endpoint details:
+    # https://dev.fitbit.com/build/reference/web-api/oauth2/#token-introspection
+
+    try:
+        resp = timed_request(session, "POST",
+                              "https://api.fitbit.com/1.1/oauth2/introspect",
+                              headers=headers, data=data)
+        if resp.status_code == 200:
+            info = resp.json()
+            scopes = info.get("scope", "")
+            print(f"Scopes para {user_id}: {scopes}")
+            if "heartrate" not in scopes or "respiratory_rate" not in scopes:
+                print("⚠️ Falta heartrate o respiratory_rate")
+        else:
+            print(f"Error introspectando token: {resp.status_code}")
+    except Exception as e:
+        print(f"Error en introspect: {e}")
+
+
+def _api_request_with_retry(session: requests.Session, headers: Dict, url: str,
+                             data_key: str = None, refresh_cb=None) -> Tuple[Optional[Dict], int]:
+    retry = 0
+    while retry < 3:
+        time.sleep(API_DELAY)
+        try:
+            resp = timed_request(session, "GET", url, headers=headers)
+        except Exception as e:
+            print(f"Error en petición a {url}: {e}")
+            return None, 0
+        if resp.status_code == 200:
+            return (resp.json().get(data_key) if data_key else resp.json(), 200)
+        if resp.status_code == 401 and refresh_cb and retry == 0:
+            new_token = refresh_cb()
+            if not new_token:
+                return None, 401
+            headers["Authorization"] = f"Bearer {new_token}"
+            retry += 1
+            continue
+        if resp.status_code == 429:
+            reset = int(resp.headers.get("Fitbit-Rate-Limit-Reset", "60"))
+            wait = (2 ** retry) * reset
+            print(f"Rate limit alcanzado. Esperando {wait}s")
+            time.sleep(wait)
+            retry += 1
+            continue
+        if resp.status_code in (403, 404):
+            return None, resp.status_code
+        return None, resp.status_code
+    return None, resp.status_code
+
+
+def fetch_hrv_data(client_id: str, client_secret: str, date: str, intraday: bool = None) -> Optional[Dict]:
+    if intraday is None:
+        intraday = USE_INTRADAY
+    token = refresh_access_token(client_id, client_secret)
+    if not token:
+        return None
+    headers = {"Authorization": f"Bearer {token}"}
+    session = create_session()
+
+    if intraday:
+        debug_print_token_scopes(client_id)
+        # HRV intraday requires explicit Intraday Access approval:
+        # https://dev.fitbit.com/build/reference/web-api/intraday-access/
+        url = f"https://api.fitbit.com/1/user/-/hrv/date/{date}/all.json"
+        data, status = _api_request_with_retry(
+            session, headers, url, "hrv",
+            refresh_cb=lambda: refresh_access_token(client_id, client_secret)
+        )
+        if status == 403:
+            print("Falta acceso intradía aprobado por Fitbit para múltiples usuarios. Cambia a summary o solicita Intraday Access.")
+            intraday = False
+    if not intraday:
+        # HRV summary endpoint documented at:
+        # https://dev.fitbit.com/build/reference/web-api/heartrate-variability/
+        url = f"https://api.fitbit.com/1/user/-/hrv/date/{date}.json"
+        data, status = _api_request_with_retry(
+            session, headers, url, "hrv",
+            refresh_cb=lambda: refresh_access_token(client_id, client_secret)
+        )
+    today = datetime.now().strftime("%Y-%m-%d")
+    if date == today and not data:
+        print("HRV sin datos todavía")
+    return data
+
+
+def fetch_br_data(client_id: str, client_secret: str, date: str, intraday: bool = None) -> Optional[Dict]:
+    if intraday is None:
+        intraday = USE_INTRADAY
+    token = refresh_access_token(client_id, client_secret)
+    if not token:
+        return None
+    headers = {"Authorization": f"Bearer {token}"}
+    session = create_session()
+
+    if intraday:
+        debug_print_token_scopes(client_id)
+        # Breathing rate intraday: https://dev.fitbit.com/build/reference/web-api/breathing-rate/
+        url = f"https://api.fitbit.com/1/user/-/br/date/{date}/all.json"
+        data, status = _api_request_with_retry(
+            session, headers, url, "br",
+            refresh_cb=lambda: refresh_access_token(client_id, client_secret)
+        )
+        if status == 403:
+            print("Falta acceso intradía aprobado por Fitbit para múltiples usuarios. Cambia a summary o solicita Intraday Access.")
+            intraday = False
+    if not intraday:
+        url = f"https://api.fitbit.com/1/user/-/br/date/{date}.json"
+        data, status = _api_request_with_retry(
+            session, headers, url, "br",
+            refresh_cb=lambda: refresh_access_token(client_id, client_secret)
+        )
+    today = datetime.now().strftime("%Y-%m-%d")
+    if date == today and not data:
+        print("Frecuencia respiratoria sin datos todavía")
+    return data
+
 def get_fitbit_data(client_id: str, client_secret: str, date: str) -> Optional[Dict]:
     token = refresh_access_token(client_id, client_secret)
     if not token:
@@ -707,24 +874,41 @@ def get_fitbit_data(client_id: str, client_secret: str, date: str) -> Optional[D
     session = create_session()
     result = {"Fecha": date, "ID_Cliente": client_id}
 
-    def api_request(url: str, data_key: str = None) -> Optional[Dict]:
-        time.sleep(API_DELAY)
-        try:
-            response = timed_request(session, "GET", url, headers=headers)
+    def api_request(url: str, data_key: str = None) -> Tuple[Optional[Dict], int]:
+        retry = 0
+        while retry < 3:
+            time.sleep(API_DELAY)
+            try:
+                response = timed_request(session, "GET", url, headers=headers)
+            except Exception as e:
+                print(f"Error en petición a {url}: {e}")
+                return None, 0
+
             if response.status_code == 200:
-                return response.json().get(data_key) if data_key else response.json()
-            elif response.status_code == 404:
-                print(f"Datos no encontrados en {url}")
-                return None
-            elif response.status_code == 403:
+                return (response.json().get(data_key) if data_key else response.json(), 200)
+            if response.status_code == 401 and retry == 0:
+                new_token = refresh_access_token(client_id, client_secret)
+                if not new_token:
+                    return None, 401
+                headers["Authorization"] = f"Bearer {new_token}"
+                retry += 1
+                continue
+            if response.status_code == 403:
                 print(f"Permisos insuficientes para {url}")
-                return None
-            else:
-                print(f"Error en {url}: {response.status_code} - {response.text}")
-                return None
-        except Exception as e:
-            print(f"Error en petición a {url}: {e}")
-            return None
+                return None, 403
+            if response.status_code == 429:
+                reset = int(response.headers.get("Fitbit-Rate-Limit-Reset", "60"))
+                wait = (2 ** retry) * reset
+                print(f"Rate limit alcanzado. Esperando {wait}s")
+                time.sleep(wait)
+                retry += 1
+                continue
+            if response.status_code == 404:
+                print(f"Datos no encontrados en {url}")
+                return None, 404
+            print(f"Error en {url}: {response.status_code} - {response.text}")
+            return None, response.status_code
+        return None, response.status_code
 
     # 1. Perfil de usuario
     if profile := api_request("https://api.fitbit.com/1/user/-/profile.json", "user"):
@@ -736,10 +920,8 @@ def get_fitbit_data(client_id: str, client_secret: str, date: str) -> Optional[D
 
     # 2. Endpoints principales existentes
     existing_endpoints = [
-        ("Frecuencia_Respiratoria", f"https://api.fitbit.com/1/user/-/br/date/{date}/all.json", "br"),
         ("Ritmo_Cardiaco", f"https://api.fitbit.com/1/user/-/activities/heart/date/{date}/1d/1sec.json", "activities-heart-intraday"),
         ("Resumen_Actividades", f"https://api.fitbit.com/1/user/-/activities/date/{date}.json", "summary"),
-        ("HRV", f"https://api.fitbit.com/1/user/-/hrv/date/{date}/all.json", "hrv"),
         ("SpO2", f"https://api.fitbit.com/1/user/-/spo2/date/{date}/all.json", "minutes")
     ]
 
@@ -779,9 +961,13 @@ def get_fitbit_data(client_id: str, client_secret: str, date: str) -> Optional[D
             ("Dispositivos", f"https://api.fitbit.com/1/user/-/devices.json", None)
         ]
 
-    # Combinar todos los endpoints
+    # Datos de HRV y BR con manejo de intradía/summary
+    result["HRV"] = fetch_hrv_data(client_id, client_secret, date)
+    result["Frecuencia_Respiratoria"] = fetch_br_data(client_id, client_secret, date)
+
+    # Combinar todos los endpoints restantes
     all_endpoints = (
-        existing_endpoints + 
+        existing_endpoints +
         activity_endpoints +
         sleep_endpoints +
         heart_endpoints +
@@ -789,15 +975,16 @@ def get_fitbit_data(client_id: str, client_secret: str, date: str) -> Optional[D
         device_endpoints
     )
 
-    # Procesar todos los endpoints
     for name, url, key in all_endpoints:
-        result[name] = api_request(url, key) or "No disponible"
+        data, _ = api_request(url, key)
+        result[name] = data or "No disponible"
 
     # Mantener el procesamiento de actividades intraday existente
     activities = {}
     for resource in ["steps", "calories", "distance", "elevation"]:
         url = f"https://api.fitbit.com/1/user/-/activities/{resource}/date/{date}/1d/1min.json"
-        if data := api_request(url, f"activities-{resource}-intraday"):
+        data, _ = api_request(url, f"activities-{resource}-intraday")
+        if data:
             activities[resource] = data.get("dataset", "No disponible")
         else:
             activities[resource] = "No disponible"
