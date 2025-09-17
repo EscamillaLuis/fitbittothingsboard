@@ -103,7 +103,19 @@ def generate_static_payload(data, usuario, use_current_ts: bool = False):
             values["HRV_intraday_lf_median"] = lf_sorted[len(lf_sorted)//2]
         if hf_vals:
             hf_sorted = sorted(hf_vals)
-            values["HRV_intraday_hf_median"] = hf_sorted[len(hf_sorted)//2]        
+            values["HRV_intraday_hf_median"] = hf_sorted[len(hf_sorted)//2]
+
+    proxy = data.get("HRV_Proxy", {})
+    if isinstance(proxy, dict):
+        rp = proxy.get("rmssd_proxy_ms")
+        sd = proxy.get("sdnn_proxy_ms")
+        pn = proxy.get("pnn50_proxy")
+        if isinstance(rp, (int, float)):
+            values["HRV_proxy_rmssd_ms"] = rp
+        if isinstance(sd, (int, float)):
+            values["HRV_proxy_sdnn_ms"] = sd
+        if isinstance(pn, (int, float)):
+            values["HRV_proxy_pnn50"] = pn        
     sleep_list = data.get("Resumen_Sueño", [])
     if isinstance(sleep_list, list) and sleep_list:
         sleep = sleep_list[0]
@@ -212,6 +224,40 @@ def generate_time_series_payloads(data, window_seconds, usuario):
             values[metric] = round(sum(vals) / len(vals))
         payloads.append({"ts": ts, "values": values})
 
+    return payloads
+
+
+def generate_hrv_proxy_time_series_payloads(data, usuario):
+    """
+    Convierte data['HRV_Proxy_Series'] en payloads ThingsBoard.
+    Usa window_end como timestamp del bucket.
+    """
+    import datetime as _dt
+    series = data.get("HRV_Proxy_Series")
+    if not isinstance(series, list) or not series:
+        return []
+    payloads = []
+    for row in series:
+        end_iso = row.get("window_end")
+        if not end_iso:
+            continue
+        try:
+            ts = int(_dt.datetime.fromisoformat(end_iso).timestamp() * 1000)
+        except Exception:
+            continue
+        values = {
+            "Usuario": usuario,
+        }
+        for k_src, k_dst in [
+            ("rmssd_proxy_ms", "HRV_PROXY_RMSSD"),
+            ("sdnn_proxy_ms",  "HRV_PROXY_SDNN"),
+            ("pnn50_proxy",    "HRV_PROXY_PNN50"),
+            ("n",              "HRV_PROXY_N"),
+        ]:
+            v = row.get(k_src)
+            if isinstance(v, (int, float)):
+                values[k_dst] = v
+        payloads.append({"ts": ts, "values": values})
     return payloads
 
 
