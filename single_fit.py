@@ -68,7 +68,7 @@ OAUTH_SCOPES = [
 # Flag to determine whether the application should request intraday
 # endpoints for HRV/BR.  If ``USE_INTRADAY`` is not set or is "false",
 # the less permission-demanding summary endpoints are used instead.
-USE_INTRADAY = os.getenv("USE_INTRADAY", "false").lower() == "true"
+USE_INTRADAY = os.getenv("USE_INTRADAY", "true").lower() == "true"
 
 logger = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO)
@@ -633,15 +633,13 @@ def check_scopes(client_id: str):
     
 
 def token_has_scope(client_id: str, scope: str) -> bool:
-    """Return True if stored token for ``client_id`` includes ``scope``."""
+    """True si el token guardado para client_id incluye 'scope' (case-insensitive)."""
     tokens = load_tokens()
     token_data = tokens.get(client_id, {})
     scope_value = token_data.get("scope", "")
-    if isinstance(scope_value, list):
-        current_scopes = set(scope_value)
-    else:
-        current_scopes = set(scope_value.split())
-    return scope in current_scopes
+    # reutiliza el normalizador para cualquier formato
+    current_scopes = _normalize_scopes_set(scope_value)
+    return scope.strip().lower() in current_scopes
 
 def reauthenticate_scopes(client_id: str, client_secret: str) -> Optional[str]:
     print(f"Iniciando reautenticación para {client_id} con scopes completos...")
@@ -732,13 +730,42 @@ def refresh_access_token(client_id: str, client_secret: str) -> Optional[str]:
         return None
 
 
-def debug_print_token_scopes(user_id: str):
-    """Print the scopes associated with the stored access token for ``user_id``.
+import re
 
-    This function calls Fitbit's introspect endpoint to verify which scopes
-    were granted to the current access token.  It is useful during debugging
-    to ensure that the application has permission to query specific
-    resources such as heart rate variability or breathing rate.
+def _normalize_scopes_set(raw) -> set[str]:
+    """
+    Devuelve un set de nombres de scope en minúsculas, sin sufijos (=READ/_WRITE).
+    Soporta:
+      - "activity heartrate respiratory_rate ..."
+      - "{ELECTROCARDIOGRAM=READ_WRITE, SETTINGS=READ_WRITE, ...}"
+      - ["heartrate", "sleep", ...] o dict con claves de scopes
+    """
+    if raw is None:
+        return set()
+
+    # dict: usar claves
+    if isinstance(raw, dict):
+        return {str(k).strip().lower() for k in raw.keys()}
+
+    # lista: normalizar cada item
+    if isinstance(raw, list):
+        return {str(x).strip().lower() for x in raw}
+
+    s = str(raw).strip()
+
+    # Caso "ELECTROCARDIOGRAM=READ_WRITE, SETTINGS=READ_WRITE, ..."
+    if "=" in s and "," in s:
+        names = [m.group(1) for m in re.finditer(r'([A-Za-z_]+)\s*=', s)]
+        return {n.strip().lower() for n in names if n}
+
+    # Caso "activity heartrate respiratory_rate ..."
+    # o "activity,heartrate,respiratory_rate"
+    s = s.replace(",", " ")
+    return {tok.strip().lower() for tok in s.split() if tok.strip()}
+
+def debug_print_token_scopes(user_id: str):
+    """
+    Imprime scopes del access token actual (normalizados) usando el endpoint de introspección.
     """
     tokens = load_tokens()
     token_data = tokens.get(user_id)
@@ -764,24 +791,22 @@ def debug_print_token_scopes(user_id: str):
                "Content-Type": "application/x-www-form-urlencoded"}
     data = {"token": token_data.get("access_token", "")}
 
-    # Introspect endpoint details:
-    # https://dev.fitbit.com/build/reference/web-api/oauth2/#token-introspection
-
     try:
         resp = timed_request(session, "POST",
-                              "https://api.fitbit.com/1.1/oauth2/introspect",
-                              headers=headers, data=data)
+                             "https://api.fitbit.com/1.1/oauth2/introspect",
+                             headers=headers, data=data)
         if resp.status_code == 200:
             info = resp.json()
-            scopes = info.get("scope", "")
-            print(f"Scopes para {user_id}: {scopes}")
-            if "heartrate" not in scopes or "respiratory_rate" not in scopes:
+            raw_scopes = info.get("scope", "")
+            print(f"Scopes para {user_id}: {raw_scopes}")  # deja visible el bruto
+            scopes = _normalize_scopes_set(raw_scopes)
+            # Chequeo sin falsos negativos
+            if not {"heartrate", "respiratory_rate"}.issubset(scopes):
                 print("⚠️ Falta heartrate o respiratory_rate")
         else:
             print(f"Error introspectando token: {resp.status_code}")
     except Exception as e:
-        print(f"Error en introspect: {e}")
-
+        print(f"Error introspectando token: {e}")
 
 def _api_request_with_retry(session: requests.Session, headers: Dict, url: str,
                              data_key: str = None, refresh_cb=None) -> Tuple[Optional[Dict], int]:
@@ -819,27 +844,35 @@ def _api_request_with_retry(session: requests.Session, headers: Dict, url: str,
 _HRV_INTRADAY_CAP_CACHE: Dict[str, bool] = {}
 
 
-def check_hrv_intraday_capability(client_id: str, session: requests.Session, headers: Dict) -> bool:
-    """Check once whether intraday HRV endpoint is enabled for ``client_id``."""
+def check_hrv_intraday_capability(
+    client_id: str,
+    session: requests.Session,
+    headers: Dict,
+    date_to_check: str,
+) -> bool:
+    """Verifica si el endpoint HRV intradía está habilitado para la app/usuario usando la FECHA objetivo."""
     if client_id in _HRV_INTRADAY_CAP_CACHE:
         return _HRV_INTRADAY_CAP_CACHE[client_id]
-    test_date = datetime.now().strftime("%Y-%m-%d")
-    url = f"https://api.fitbit.com/1/user/-/hrv/date/{test_date}/all.json"
+
+    url = f"https://api.fitbit.com/1/user/-/hrv/date/{date_to_check}/all.json"
     try:
         resp = session.get(url, headers=headers, timeout=DEFAULT_TIMEOUT)
     except Exception as e:
         print(f"Error verificando HRV intradía: {e}")
         _HRV_INTRADAY_CAP_CACHE[client_id] = False
         return False
+
     if resp.status_code == 200:
         _HRV_INTRADAY_CAP_CACHE[client_id] = True
         return True
+
     if resp.status_code in (403, 404):
-        print("HRV intradía no habilitado para esta app/usuario. Se entregará sólo resumen (dailyRmssd, deepRmssd).")
+        print("HRV intradía no habilitado para esta app/usuario (403/404).")
     elif resp.status_code == 401:
-        print("Token inválido al verificar HRV intradía.")
+        print("Token inválido al verificar HRV intradía (401).")
     else:
         print(f"No se pudo verificar HRV intradía: {resp.status_code}")
+
     _HRV_INTRADAY_CAP_CACHE[client_id] = False
     return False
 
@@ -866,19 +899,33 @@ def _parse_hrv_minutes(raw_minutes: List[Dict]) -> List[Dict]:
     return minutes
 
 
-def fetch_hrv_intraday(client_id: str, client_secret: str, date: str,
-                       session: requests.Session = None) -> Optional[Dict]:
-    """Fetch intraday HRV for ``date`` if capability and scope allow it."""
+def fetch_hrv_intraday(
+    client_id: str,
+    client_secret: str,
+    date: str,
+    session: requests.Session = None
+) -> Optional[Dict]:
+    """Pide HRV intradía para 'date' si hay capacidad y scope."""
+
+    # 1) refresca token
     token = refresh_access_token(client_id, client_secret)
     if not token:
         return None
+
+    # 2) valida scope
     if not token_has_scope(client_id, "heartrate"):
-        print("Token sin scope heartrate. Re-autenticar con dicho scope.")
+        print("Token sin scope 'heartrate'. Reautenticar con dicho scope.")
         return None
+
+    # 3) crea session + headers ANTES de llamar al check (evita UnboundLocalError)
     session = session or create_session()
     headers = {"Authorization": f"Bearer {token}"}
-    if not check_hrv_intraday_capability(client_id, session, headers):
+
+    # 4) checa capacidad intradía para la fecha objetivo
+    if not check_hrv_intraday_capability(client_id, session, headers, date):
         return None
+
+    # 5) consume endpoint intradía
     url = f"https://api.fitbit.com/1/user/-/hrv/date/{date}/all.json"
     backoff = 1
     for attempt in range(3):
@@ -887,18 +934,21 @@ def fetch_hrv_intraday(client_id: str, client_secret: str, date: str,
         except Exception as e:
             print(f"Error en petición HRV intradía: {e}")
             return None
+
         if resp.status_code == 200:
             data = resp.json().get("hrv", [])
             if not data:
                 return None
             minutes = _parse_hrv_minutes(data[0].get("minutes", []))
             return {"date": data[0].get("dateTime"), "minutes": minutes}
+
         if resp.status_code == 401 and attempt == 0:
             new_token = refresh_access_token(client_id, client_secret)
             if not new_token:
                 return None
             headers["Authorization"] = f"Bearer {new_token}"
             continue
+
         if resp.status_code == 429:
             retry_after = int(resp.headers.get("Retry-After", "1"))
             wait = max(retry_after, backoff)
@@ -906,17 +956,21 @@ def fetch_hrv_intraday(client_id: str, client_secret: str, date: str,
             time.sleep(wait)
             backoff *= 2
             continue
+
         if resp.status_code >= 500:
             wait = backoff
             print(f"Error {resp.status_code} en HRV intradía. Reintento en {wait}s")
             time.sleep(wait)
             backoff *= 2
             continue
+
         if resp.status_code in (403, 404):
-            print("HRV intradía no habilitado para esta app/usuario. Se entregará sólo resumen (dailyRmssd, deepRmssd).")
+            print("HRV intradía no habilitado (403/404). Se entregará sólo el resumen.")
             return None
+
         print(f"Error al obtener HRV intradía: {resp.status_code}")
         return None
+
     return None
 
 
@@ -929,7 +983,7 @@ def fetch_hrv_intraday_range(client_id: str, client_secret: str,
         return None
     session = create_session()
     headers = {"Authorization": f"Bearer {token}"}
-    if not check_hrv_intraday_capability(client_id, session, headers):
+    if not check_hrv_intraday_capability(client_id, session, headers, start_date):
         return None
     url = f"https://api.fitbit.com/1/user/-/hrv/date/{start_date}/{end_date}/all.json"
     try:
@@ -1393,45 +1447,45 @@ def create_sleep_sheet(writer, data, date):
             print(f"Error procesando datos de sueño: {e}")
 
 def create_hrv_sheet(writer, data, date):
-    """Crea hoja con datos de HRV (Variabilidad del Ritmo Cardíaco)"""
-    if "HRV" in data and isinstance(data["HRV"], list):
-        try:
-            hrv_data = []
-            for entry in data["HRV"]:
-                minutes = entry.get("minutes", [])
-                if minutes and isinstance(minutes, list):
-                    for minute in minutes:
-                        value = minute.get("value", {})
-                        hrv_data.append({
-                            "Fecha_Hora": minute.get("minute", ""),
-                            "RMSSD": value.get("rmssd", ""),
-                            "Cobertura": value.get("coverage", ""),
-                            "HF": value.get("hf", ""),
-                            "LF": value.get("lf", "")
-                        })
-            
-            if hrv_data:
-                df_hrv = pd.DataFrame(hrv_data)
-                df_hrv.insert(0, "Fecha", date)
-                
-                # Calcular estadísticas
-                stats = {
-                    "Estadística": ["RMSSD Promedio", "RMSSD Máximo", "RMSSD Mínimo", "HF Promedio", "LF Promedio"],
-                    "Valor": [
-                        df_hrv["RMSSD"].mean(),
-                        df_hrv["RMSSD"].max(),
-                        df_hrv["RMSSD"].min(),
-                        df_hrv["HF"].mean(),
-                        df_hrv["LF"].mean()
-                    ]
-                }
-                df_hrv_stats = pd.DataFrame(stats)
-                
-                # Escribir ambas tablas en la misma hoja
-                df_hrv.to_excel(writer, sheet_name="HRV", index=False, startrow=0)
-                df_hrv_stats.to_excel(writer, sheet_name="HRV", index=False, startrow=len(df_hrv)+3)
-        except Exception as e:
-            print(f"Error procesando datos HRV: {e}")
+    """
+    Hoja 'HRV' con:
+      - Resumen diario (dailyRmssd, deepRmssd) si existe en data['HRV'].
+      - Intradía minuto a minuto si existe en data['HRV_intraday'].
+    """
+    import pandas as pd
+
+    # --- Resumen diario ---
+    daily_rows = []
+    hrv_summary = data.get("HRV")
+    if isinstance(hrv_summary, list) and hrv_summary:
+        v = (hrv_summary[0] or {}).get("value", {})
+        daily_rows.append({
+            "Fecha": date,
+            "dailyRmssd": v.get("dailyRmssd"),
+            "deepRmssd": v.get("deepRmssd"),
+        })
+    df_daily = pd.DataFrame(daily_rows) if daily_rows else pd.DataFrame(
+        columns=["Fecha", "dailyRmssd", "deepRmssd"]
+    )
+    df_daily.to_excel(writer, sheet_name="HRV", index=False, startrow=0)
+
+    # --- Intradía (minuto a minuto) ---
+    intraday = data.get("HRV_intraday") or {}
+    minutes = intraday.get("minutes") if isinstance(intraday, dict) else None
+    if isinstance(minutes, list) and minutes:
+        df_min = pd.DataFrame(minutes).rename(columns={
+            "time": "Tiempo",
+            "rmssd": "RMSSD",
+            "coverage": "Cobertura",
+            "lf": "LF",
+            "hf": "HF",
+        })
+        df_min.to_excel(
+            writer,
+            sheet_name="HRV",
+            index=False,
+            startrow=len(df_daily) + 3  # deja espacio bajo el resumen
+        )
 
 def create_spo2_sheet(writer, data, date):
     """Crea hoja con datos de SpO2 (Oxigenación)"""
