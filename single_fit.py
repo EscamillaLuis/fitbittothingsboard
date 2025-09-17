@@ -37,38 +37,42 @@ from send_to_thingsboard import (
     generate_time_series_payloads,
     mqtt_publish
 )
+from tools.hrv_proxy import (
+    parse_times_and_hr_from_data,
+    aggregate_proxies_from_hr,
+    windowed_proxies,
+)
 THINGSBOARD_MQTT_HOST = 'thingsboard.cloud'
 THINGSBOARD_MQTT_PORT = 1883
 AGG_WINDOW_SECONDS = 60
 
 DEFAULT_TIMEOUT = (5, 30)
 
-REQUIRED_SCOPES = {
-    "activity",
-    "heartrate",
-    "sleep",
-    "profile",
-    "settings",
-    "weight",
-    "respiratory_rate",
-    "electrocardiogram",
-    "oxygen_saturation",
-}
-
-# Scopes used during the OAuth authorization flow.  Fitbit requires
+# Scopes used during the OAuth authorization flow. Fitbit requires
 # explicit permission for each type of data we plan to access.
 OAUTH_SCOPES = [
     "activity",
     "heartrate",
-    "respiratory_rate",
     "sleep",
     "profile",
+    "respiratory_rate",
+    "oxygen_saturation",
+    "weight",
+    "settings",
 ]
+
+REQUIRED_SCOPES = set(OAUTH_SCOPES)
 
 # Flag to determine whether the application should request intraday
 # endpoints for HRV/BR.  If ``USE_INTRADAY`` is not set or is "false",
 # the less permission-demanding summary endpoints are used instead.
 USE_INTRADAY = os.getenv("USE_INTRADAY", "true").lower() == "true"
+
+# HRV Proxy (por defecto habilitado). Ajustable vía env.
+HRV_PROXY_ENABLED = os.getenv("HRV_PROXY_ENABLED", "true").lower() == "true"
+HRV_PROXY_WINDOW_SECONDS = int(os.getenv("HRV_PROXY_WINDOW_SECONDS", "300"))  # 5 min
+HRV_PROXY_STEP_SECONDS   = int(os.getenv("HRV_PROXY_STEP_SECONDS", "60"))    # 1 min
+HRV_PROXY_MIN_SAMPLES    = int(os.getenv("HRV_PROXY_MIN_SAMPLES", "60"))     # min 60 puntos
 
 logger = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO)
@@ -76,6 +80,12 @@ logging.getLogger('urllib3').setLevel(logging.WARNING)
 
 _conn_timings = threading.local()
 
+
+# HRV Proxy (por defecto habilitado). Ajustable vía env.
+HRV_PROXY_ENABLED = os.getenv("HRV_PROXY_ENABLED", "true").lower() == "true"
+HRV_PROXY_WINDOW_SECONDS = int(os.getenv("HRV_PROXY_WINDOW_SECONDS", "300"))  # 5 min
+HRV_PROXY_STEP_SECONDS   = int(os.getenv("HRV_PROXY_STEP_SECONDS", "60"))    # 1 min
+HRV_PROXY_MIN_SAMPLES    = int(os.getenv("HRV_PROXY_MIN_SAMPLES", "60"))     # min 60 puntos
 
 def _force_ipv4() -> int:
     return socket.AF_INET
@@ -646,7 +656,7 @@ def reauthenticate_scopes(client_id: str, client_secret: str) -> Optional[str]:
     fitbit_session = OAuth2Session(
         client_id,
         redirect_uri=REDIRECT_URI,
-        scope=list(REQUIRED_SCOPES),
+        scope=OAUTH_SCOPES,
     )
     authorization_url, _ = fitbit_session.authorization_url("https://www.fitbit.com/oauth2/authorize")
     print("Abre la siguiente URL en tu navegador y autoriza el acceso:")
@@ -689,10 +699,19 @@ def refresh_access_token(client_id: str, client_secret: str) -> Optional[str]:
         current_scopes = set(scope_value.split())
         scope_str = scope_value
 
+    current_scopes = {s.strip().lower() for s in current_scopes}
+
     if not REQUIRED_SCOPES.issubset(current_scopes):
         missing_scopes = REQUIRED_SCOPES - current_scopes
-        print(f"Error: Faltan scopes esenciales para {client_id}: {missing_scopes}")
-        return reauthenticate_scopes(client_id, client_secret)
+        strict_scopes = os.getenv("FITBIT_STRICT_SCOPES", "false").lower() == "true"
+        if strict_scopes:
+            print(f"Error: Faltan scopes esenciales para {client_id}: {missing_scopes}")
+            return reauthenticate_scopes(client_id, client_secret)
+        logger.warning(
+            "Continuando con scopes parciales para %s. Faltan: %s",
+            client_id,
+            ", ".join(sorted(missing_scopes)),
+        )
 
     auth_header = b64encode(f"{client_id}:{client_secret}".encode()).decode()
     headers = {
@@ -703,7 +722,7 @@ def refresh_access_token(client_id: str, client_secret: str) -> Optional[str]:
     data = {
         "grant_type": "refresh_token",
         "refresh_token": refresh_token,
-        "scope": scope_str or "activity heartrate oxygen_saturation respiratory_rate electrocardiogram sleep settings weight"
+        "scope": scope_str or " ".join(OAUTH_SCOPES)
     }
 
     try:
@@ -798,7 +817,6 @@ def debug_print_token_scopes(user_id: str):
         if resp.status_code == 200:
             info = resp.json()
             raw_scopes = info.get("scope", "")
-            print(f"Scopes para {user_id}: {raw_scopes}")  # deja visible el bruto
             scopes = _normalize_scopes_set(raw_scopes)
             # Chequeo sin falsos negativos
             if not {"heartrate", "respiratory_rate"}.issubset(scopes):
@@ -1000,6 +1018,36 @@ def fetch_hrv_intraday_range(client_id: str, client_secret: str,
         minutes = _parse_hrv_minutes(day.get("minutes", []))
         result.append({"date": day.get("dateTime"), "minutes": minutes})
     return result
+
+
+def compute_and_attach_hrv_proxy(data: dict) -> dict:
+    """
+    Si hay Ritmo_Cardiaco.dataset, calcula HRV_Proxy (agregado) y HRV_Proxy_Series (ventanas)
+    y los adjunta al dict 'data'. Si falta HR, no hace nada.
+    """
+    try:
+        times, hr = parse_times_and_hr_from_data(data)
+        if not times:
+            return data
+        agg = aggregate_proxies_from_hr(hr)
+        series = windowed_proxies(
+            times, hr,
+            window_seconds=HRV_PROXY_WINDOW_SECONDS,
+            step_seconds=HRV_PROXY_STEP_SECONDS,
+            min_samples=HRV_PROXY_MIN_SAMPLES,
+        )
+        data["HRV_Proxy"] = {
+            "rmssd_proxy_ms": agg.rmssd_proxy_ms,
+            "sdnn_proxy_ms": agg.sdnn_proxy_ms,
+            "pnn50_proxy": agg.pnn50_proxy,
+            "valid_samples": agg.valid_samples,
+        }
+        data["HRV_Proxy_Series"] = series
+    except Exception as e:
+        print(f"Error calculando HRV Proxy: {e}")
+    return data
+
+
 def fetch_hrv_data(client_id: str, client_secret: str, date: str, intraday: bool = None) -> Optional[Dict]:
     if intraday is None:
         intraday = USE_INTRADAY
@@ -1075,6 +1123,9 @@ def get_fitbit_data(client_id: str, client_secret: str, date: str) -> Optional[D
     session = create_session()
     result = {"Fecha": date, "ID_Cliente": client_id}
 
+    has_oxygen_scope = token_has_scope(client_id, "oxygen_saturation")
+    has_weight_scope = token_has_scope(client_id, "weight")
+
     def api_request(url: str, data_key: str = None) -> Tuple[Optional[Dict], int]:
         retry = 0
         while retry < 3:
@@ -1124,8 +1175,9 @@ def get_fitbit_data(client_id: str, client_secret: str, date: str) -> Optional[D
     existing_endpoints = [
         ("Ritmo_Cardiaco", f"https://api.fitbit.com/1/user/-/activities/heart/date/{date}/1d/1sec.json", "activities-heart-intraday"),
         ("Resumen_Actividades", f"https://api.fitbit.com/1/user/-/activities/date/{date}.json", "summary"),
-        ("SpO2", f"https://api.fitbit.com/1/user/-/spo2/date/{date}/all.json", "minutes")
     ]
+    if has_oxygen_scope:
+        existing_endpoints.append(("SpO2", f"https://api.fitbit.com/1/user/-/spo2/date/{date}/all.json", "minutes"))
 
     # 3. Endpoints de actividad
     activity_endpoints = [
@@ -1150,11 +1202,13 @@ def get_fitbit_data(client_id: str, client_secret: str, date: str) -> Optional[D
     ]
 
     # 6. Peso y composición corporal (actualizado)
-    body_endpoints = [
-        ("Peso", f"https://api.fitbit.com/1/user/-/body/log/weight/date/{date}.json", "weight"),
-        ("Grasa_Corporal", f"https://api.fitbit.com/1/user/-/body/log/fat/date/{date}.json", "fat"),
-        ("IMC", f"https://api.fitbit.com/1/user/-/body/log/bmi/date/{date}.json", "bmi")
-    ]
+    body_endpoints = []
+    if has_weight_scope:
+        body_endpoints.extend([
+            ("Peso", f"https://api.fitbit.com/1/user/-/body/log/weight/date/{date}.json", "weight"),
+            ("Grasa_Corporal", f"https://api.fitbit.com/1/user/-/body/log/fat/date/{date}.json", "fat"),
+            ("IMC", f"https://api.fitbit.com/1/user/-/body/log/bmi/date/{date}.json", "bmi"),
+        ])
 
     # 7. Dispositivos (solo si tenemos permisos)
     device_endpoints = []
@@ -1196,6 +1250,8 @@ def get_fitbit_data(client_id: str, client_secret: str, date: str) -> Optional[D
     
     result["Actividades"] = activities
 
+    if HRV_PROXY_ENABLED:
+        result = compute_and_attach_hrv_proxy(result)
     return result
 
 def save_daily_data(client_id: str, data: Dict) -> bool:
@@ -1259,6 +1315,9 @@ def export_json_to_excel_single(client_id: str, date: str, data_dir: str = "fitb
             
             # 6. Hoja de HRV (Variabilidad del Ritmo Cardíaco)
             create_hrv_sheet(writer, data, date)
+            
+            # 6.5. Hoja de HRV PROXY
+            create_hrv_proxy_sheet(writer, data, date)
             
             # 7. Hoja de SpO2 (Oxigenación)
             create_spo2_sheet(writer, data, date)
@@ -1486,6 +1545,28 @@ def create_hrv_sheet(writer, data, date):
             index=False,
             startrow=len(df_daily) + 3  # deja espacio bajo el resumen
         )
+
+def create_hrv_proxy_sheet(writer, data, date):
+    """Hoja 'HRV_PROXY' con agregado + series por ventana (si existen)."""
+    import pandas as pd
+    agg = data.get("HRV_Proxy") or {}
+    series = data.get("HRV_Proxy_Series") or []
+    # Agregado
+    df_agg = pd.DataFrame([{
+        "Fecha": date,
+        "rmssd_proxy_ms": agg.get("rmssd_proxy_ms"),
+        "sdnn_proxy_ms": agg.get("sdnn_proxy_ms"),
+        "pnn50_proxy": agg.get("pnn50_proxy"),
+        "valid_samples": agg.get("valid_samples"),
+        "ventana_s": HRV_PROXY_WINDOW_SECONDS,
+        "paso_s": HRV_PROXY_STEP_SECONDS,
+        "min_samples": HRV_PROXY_MIN_SAMPLES,
+    }])
+    df_agg.to_excel(writer, sheet_name="HRV_PROXY", index=False, startrow=0)
+    # Series
+    if isinstance(series, list) and series:
+        df_series = pd.DataFrame(series)
+        df_series.to_excel(writer, sheet_name="HRV_PROXY", index=False, startrow=len(df_agg)+3)
 
 def create_spo2_sheet(writer, data, date):
     """Crea hoja con datos de SpO2 (Oxigenación)"""
