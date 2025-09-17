@@ -17,6 +17,7 @@ from single_fit import (
 from send_to_thingsboard import (
     generate_static_payload,
     generate_time_series_payloads,
+    generate_hrv_proxy_time_series_payloads,
     mqtt_publish
 )
 
@@ -106,7 +107,9 @@ def process_single_date(client_id, secret, tb_token, usuario, date_str, window, 
     if (static := generate_static_payload(data, usuario, use_current_ts=monitor)):
         payloads.append(static)
     payloads.extend(generate_time_series_payloads(data, window, usuario))
-
+    # Serie HRV Proxy (si existe)
+    payloads.extend(generate_hrv_proxy_time_series_payloads(data, usuario))
+    
     if payloads:
         try:
             mqtt_publish(
