@@ -41,16 +41,27 @@ def _to_number(value):
 
 
 def _resolve_respiration(resp_entry: Dict) -> Dict[str, float]:
-    full = resp_entry.get("value", {}).get("fullSleepSummary", {})
-    metrics = {}
-    rate = full.get("breathingRate")
-    if isinstance(rate, (int, float)):
-        metrics["Frecuencia_Respiratoria"] = rate
-    for stage in full.get("breathingRateData", []) or []:
-        lvl = stage.get("level")
-        br = stage.get("breathingRate")
-        if lvl in {"light", "deep", "rem"} and isinstance(br, (int, float)):
-            metrics[f"Frecuencia_Respiratoria_{lvl}"] = br
+    metrics: Dict[str, float] = {}
+    sources = []
+    if isinstance(resp_entry, dict):
+        sources.append(resp_entry)
+        value = resp_entry.get("value")
+        if isinstance(value, dict):
+            sources.append(value)
+            full = value.get("fullSleepSummary")
+            if isinstance(full, dict):
+                sources.append(full)
+    for source in sources:
+        rate = source.get("breathingRate")
+        if isinstance(rate, (int, float)):
+            metrics["Frecuencia_Respiratoria"] = rate
+        stages = source.get("breathingRateData")
+        if isinstance(stages, list):
+            for stage in stages:
+                lvl = stage.get("level")
+                br = stage.get("breathingRate")
+                if lvl in {"light", "deep", "rem"} and isinstance(br, (int, float)):
+                    metrics[f"Frecuencia_Respiratoria_{lvl}"] = br
     return metrics
 
 
