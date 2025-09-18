@@ -1,293 +1,320 @@
-# send_to_thingsboard.py
-import os
-import json
-import time
+from __future__ import annotations
+
 import argparse
-import datetime
+import datetime as dt
+import json
+import os
+from collections import defaultdict
+from statistics import mean, median
+from typing import Dict, Iterable, List, Optional
+
 import paho.mqtt.client as mqtt
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+TOPIC = "v1/devices/me/telemetry"
 
-def parse_args():
+
+def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Envía datos a ThingsBoard vía MQTT.")
     parser.add_argument("--mqtt-host", default=os.getenv("THINGSBOARD_MQTT_HOST", "thingsboard.cloud"))
     parser.add_argument("--mqtt-port", type=int, default=int(os.getenv("MQTT_PORT", "1883")))
     parser.add_argument("--window", type=int, default=int(os.getenv("AGG_WINDOW", "300")))
     return parser.parse_args()
 
-def mqtt_publish(host, port, token, payloads):
+
+def _to_number(value):
+    if isinstance(value, (int, float)):
+        return value
+    if isinstance(value, str):
+        try:
+            num = float(value)
+            return int(num) if num.is_integer() else num
+        except ValueError:
+            return None
+    if isinstance(value, list) and value:
+        first = value[0]
+        if isinstance(first, dict) and "value" in first:
+            return _to_number(first["value"])
+    if isinstance(value, dict) and "value" in value:
+        return _to_number(value["value"])
+    return None
+
+
+def _resolve_respiration(resp_entry: Dict) -> Dict[str, float]:
+    full = resp_entry.get("value", {}).get("fullSleepSummary", {})
+    metrics = {}
+    rate = full.get("breathingRate")
+    if isinstance(rate, (int, float)):
+        metrics["Frecuencia_Respiratoria"] = rate
+    for stage in full.get("breathingRateData", []) or []:
+        lvl = stage.get("level")
+        br = stage.get("breathingRate")
+        if lvl in {"light", "deep", "rem"} and isinstance(br, (int, float)):
+            metrics[f"Frecuencia_Respiratoria_{lvl}"] = br
+    return metrics
+
+
+def _resolve_sleep_details(sleep_entry: Dict) -> Dict[str, float]:
+    values: Dict[str, float] = {}
+    summary = sleep_entry.get("levels", {}).get("summary", {})
+    for stage in ("deep", "light", "rem", "wake"):
+        mins = summary.get(stage, {}).get("minutes")
+        if isinstance(mins, (int, float)):
+            values[f"sueño_{stage}_min"] = mins
+    if isinstance(sleep_entry.get("minutesAsleep"), (int, float)):
+        values["minutos_dormidos"] = sleep_entry["minutesAsleep"]
+    if isinstance(sleep_entry.get("timeInBed"), (int, float)):
+        values["minutos_en_cama"] = sleep_entry["timeInBed"]
+    levels_data = sleep_entry.get("levels", {}).get("data", []) or []
+    values["ciclos_sueño"] = sum(1 for seg in levels_data if seg.get("level") == "deep")
+    return values
+
+
+def _resolve_intraday_hrv(intraday: Dict) -> Dict[str, float]:
+    minutes = intraday.get("minutes", []) if isinstance(intraday, dict) else []
+    rmssd_vals = [m.get("rmssd") for m in minutes if isinstance(m.get("rmssd"), (int, float))]
+    cov_vals = [m.get("coverage") for m in minutes if isinstance(m.get("coverage"), (int, float))]
+    lf_vals = [m.get("lf") for m in minutes if isinstance(m.get("lf"), (int, float))]
+    hf_vals = [m.get("hf") for m in minutes if isinstance(m.get("hf"), (int, float))]
+    metrics = {}
+    if rmssd_vals:
+        metrics["HRV_intraday_rmssd_mean"] = mean(rmssd_vals)
+    if cov_vals:
+        metrics["HRV_intraday_coverage_mean"] = mean(cov_vals)
+    if lf_vals:
+        metrics["HRV_intraday_lf_median"] = median(lf_vals)
+    if hf_vals:
+        metrics["HRV_intraday_hf_median"] = median(hf_vals)
+    return metrics
+
+
+def generate_static_payload(data: Dict, usuario: str, use_current_ts: bool = False) -> Optional[Dict]:
+    base_metrics = {
+        key: _to_number(data.get(key))
+        for key in (
+            "Edad",
+            "Peso",
+            "Grasa_Corporal",
+            "IMC",
+            "Frecuencia_Respiratoria",
+            "Ritmo_Cardiaco_Reposo",
+            "Pasos",
+            "Calorias",
+            "Distancia",
+        )
+    }
+    values = {"Usuario": usuario}
+    values.update({k: v for k, v in base_metrics.items() if isinstance(v, (int, float))})
+
+    resp_list = data.get("Frecuencia_Respiratoria")
+    if isinstance(resp_list, list) and resp_list:
+        values.update(_resolve_respiration(resp_list[0]))
+
+    hrv_list = data.get("HRV")
+    if isinstance(hrv_list, list) and hrv_list:
+        value = (hrv_list[0] or {}).get("value", {})
+        for key in ("dailyRmssd", "deepRmssd"):
+            metric = value.get(key)
+            if isinstance(metric, (int, float)):
+                values[f"HRV_{key}"] = metric
+
+    values.update(_resolve_intraday_hrv(data.get("HRV_intraday") or {}))
+
+    proxy = data.get("HRV_Proxy", {})
+    if isinstance(proxy, dict):
+        for key, alias in (
+            ("rmssd_proxy_ms", "HRV_proxy_rmssd_ms"),
+            ("sdnn_proxy_ms", "HRV_proxy_sdnn_ms"),
+            ("pnn50_proxy", "HRV_proxy_pnn50"),
+        ):
+            metric = proxy.get(key)
+            if isinstance(metric, (int, float)):
+                values[alias] = metric
+
+    sleep_list = data.get("Resumen_Sueño")
+    if isinstance(sleep_list, list) and sleep_list:
+        values.update(_resolve_sleep_details(sleep_list[0]))
+
+    actividad = data.get("Resumen_Actividades", {})
+    if isinstance(actividad, dict):
+        for key in (
+            "sedentaryMinutes",
+            "lightlyActiveMinutes",
+            "fairlyActiveMinutes",
+            "veryActiveMinutes",
+        ):
+            metric = actividad.get(key)
+            if isinstance(metric, (int, float)):
+                values[key] = metric
+
+    if len(values) == 1:
+        return None
+    
+    if use_current_ts:
+        timestamp = int(dt.datetime.now().timestamp() * 1000)
+    else:
+        date_str = data.get("Fecha")
+        if not date_str:
+            return None
+        day = dt.datetime.strptime(date_str, "%Y-%m-%d")
+        timestamp = int(dt.datetime.combine(day.date(), dt.time()).timestamp() * 1000)
+
+    return {"ts": timestamp, "values": values}
+
+
+def _add_sample(buckets, seconds: int, metric: str, value: float, window_seconds: int) -> None:
+    if not isinstance(value, (int, float)):
+        return
+    idx = seconds // window_seconds
+    buckets[idx][metric].append(value)
+
+
+def _time_to_seconds(time_str: str) -> Optional[int]:
+    if not isinstance(time_str, str):
+        return None
+    for fmt in ("%H:%M:%S", "%H:%M:%S.%f"):
+        try:
+            t_obj = dt.datetime.strptime(time_str, fmt).time()
+            return t_obj.hour * 3600 + t_obj.minute * 60 + t_obj.second
+        except ValueError:
+            continue
+    return None
+
+def _iso_to_seconds(value: str) -> Optional[int]:
+    if not isinstance(value, str):
+        return None
+    seconds = _time_to_seconds(value)
+    if seconds is not None:
+        return seconds
+    iso_value = value.rstrip()
+    if iso_value.endswith('Z'):
+        iso_value = iso_value[:-1] + '+00:00'
+    try:
+        dt_obj = dt.datetime.fromisoformat(iso_value)
+    except ValueError:
+        return None
+    if dt_obj.tzinfo is not None:
+        dt_obj = dt_obj.astimezone(dt.timezone.utc)
+    return dt_obj.hour * 3600 + dt_obj.minute * 60 + dt_obj.second
+
+
+def _parse_iso_datetime(value: str) -> Optional[dt.datetime]:
+    if not isinstance(value, str):
+        return None
+    iso_value = value.rstrip()
+    if iso_value.endswith('Z'):
+        iso_value = iso_value[:-1] + '+00:00'
+    try:
+        dt_obj = dt.datetime.fromisoformat(iso_value)
+    except ValueError:
+        return None
+    if dt_obj.tzinfo is not None:
+        return dt_obj.astimezone(dt.timezone.utc)
+    return dt_obj
+
+
+
+def generate_time_series_payloads(data: Dict, window_seconds: int, usuario: str) -> List[Dict]:
+    buckets: Dict[int, Dict[str, List[float]]] = defaultdict(lambda: defaultdict(list))
+    date_str = data.get("Fecha")
+    if not date_str:
+        return []
+    day = dt.datetime.strptime(date_str, "%Y-%m-%d")
+
+    heart = data.get("Ritmo_Cardiaco", {})
+    dataset = None
+    if isinstance(heart, dict):
+        dataset = heart.get("dataset") or heart.get("activities-heart-intraday", {}).get("dataset")
+    for entry in dataset or []:
+        seconds = _time_to_seconds(entry.get("time"))
+        if seconds is None:
+            continue
+        _add_sample(buckets, seconds, "Ritmo_Cardiaco", entry.get("value"), window_seconds)
+
+    minutes = []
+    intraday = data.get("HRV_intraday")
+    if isinstance(intraday, dict):
+        minutes = intraday.get("minutes", []) or []
+    else:
+        hrv_list = data.get("HRV")
+        if isinstance(hrv_list, list):
+            for entry in hrv_list:
+                for minute in entry.get("minutes", []):
+                    value = minute.get("value", {})
+                    minutes.append({"time": minute.get("minute"), "rmssd": value.get("rmssd")})
+    for minute in minutes:
+        minute_ts = minute.get("time")
+        seconds = _iso_to_seconds(minute_ts)
+        if seconds is None:
+            continue
+        _add_sample(buckets, seconds, "HRV_RMSSD", minute.get("rmssd"), window_seconds)
+
+    actividades = data.get("Actividades", {})
+    if isinstance(actividades, dict):
+        # Intraday activity metrics (steps, calories, distance, elevation) intentionally ignored.
+        pass
+
+    for entry in data.get("SpO2", []) or []:
+        minute = entry.get("minute")
+        seconds = _iso_to_seconds(minute)
+        if seconds is None:
+            continue
+        _add_sample(buckets, seconds, "SpO2", entry.get("value"), window_seconds)
+
+    payloads: List[Dict] = []
+    start_of_day = dt.datetime.combine(day.date(), dt.time())
+    for bucket_idx in sorted(buckets):
+        ts = int((start_of_day + dt.timedelta(seconds=bucket_idx * window_seconds)).timestamp() * 1000)
+        values = {"Usuario": usuario}
+        for metric, samples in buckets[bucket_idx].items():
+            if not samples:
+                continue
+            # Skip intraday metrics that must not be forwarded to ThingsBoard.
+            if metric in {"calories", "distance", "elevation", "steps"}:
+                continue
+            values[metric] = mean(samples)
+        payloads.append({"ts": ts, "values": values})
+    return payloads
+
+
+def generate_hrv_proxy_time_series_payloads(data: Dict, usuario: str) -> List[Dict]:
+    series = data.get("HRV_Proxy_Series")
+    if not isinstance(series, list):
+        return []
+    payloads: List[Dict] = []
+    for entry in series:
+        end_iso = entry.get("window_end")
+        if not end_iso:
+            continue
+        parsed = _parse_iso_datetime(end_iso)
+        if parsed is None:
+            continue
+        timestamp = int(parsed.timestamp() * 1000)
+        values = {"Usuario": usuario}
+        for src, dst in (
+            ("rmssd_proxy_ms", "HRV_PROXY_RMSSD"),
+            ("sdnn_proxy_ms", "HRV_PROXY_SDNN"),
+            ("pnn50_proxy", "HRV_PROXY_PNN50"),
+            ("n", "HRV_PROXY_N"),
+        ):
+            metric = entry.get(src)
+            if isinstance(metric, (int, float)):
+                values[dst] = metric
+        payloads.append({"ts": timestamp, "values": values})
+    return payloads
+
+
+def mqtt_publish(host: str, port: int, token: str, payloads: Iterable[Dict]) -> None:
+    payloads = list(payloads)
+    if not payloads:
+        return
     client = mqtt.Client()
     client.username_pw_set(token)
     client.connect(host, port)
     client.loop_start()
-    topic = "v1/devices/me/telemetry"
-    for p in payloads:
-        client.publish(topic, json.dumps(p), qos=1)
-        time.sleep(0.05)
-    client.loop_stop()
-    client.disconnect()
-
-def generate_static_payload(data, usuario, use_current_ts: bool = False):
-    """Build a telemetry payload with static daily metrics.
-
-    Parameters
-    ----------
-    data: dict
-        Fitbit data already retrieved for a particular day.
-    usuario: str
-        Identifier of the user, included in the telemetry values.
-    use_current_ts: bool
-        If True, the payload timestamp corresponds to the current
-        moment. This is useful for monitor mode where the script runs
-        several times during the day and we want each update to be
-        stored as a new time-series entry. When False (default), the
-        timestamp is set to midnight of ``data['Fecha']`` which is the
-        desired behaviour when processing historical data.
-    """
-    
-    static_keys = [
-        "Edad", "Peso", "Grasa_Corporal", "IMC",
-        "Frecuencia_Respiratoria", "Ritmo_Cardiaco_Reposo",
-        "Pasos", "Calorias", "Distancia"
-    ]
-    values = {"Usuario": usuario}
-    for key in static_keys:
-        val = data.get(key)
-        if isinstance(val, list) and val and isinstance(val[0], dict) and "value" in val[0]:
-            raw = val[0]["value"]
-        else:
-            raw = val
-        try:
-            num = float(raw)
-            values[key] = int(num) if num.is_integer() else num
-        except Exception:
-            continue
-    
-    resp_list = data.get("Frecuencia_Respiratoria", [])
-    if isinstance(resp_list, list) and resp_list:
-        full = resp_list[0].get("value", {}).get("fullSleepSummary", {})
-        rate = full.get("breathingRate")
-        if isinstance(rate, (int, float)):
-            values["Frecuencia_Respiratoria"] = rate
-        for stage in full.get("breathingRateData", []):
-            lvl = stage.get("level")
-            br = stage.get("breathingRate")
-            if lvl in {"light", "deep", "rem"} and isinstance(br, (int, float)):
-                values[f"Frecuencia_Respiratoria_{lvl}"] = br
-
-    # HRV summary
-    hrv_list = data.get("HRV", [])
-    if isinstance(hrv_list, list) and hrv_list:
-        entry = hrv_list[0]
-        value = entry.get("value", {})
-        daily = value.get("dailyRmssd")
-        deep = value.get("deepRmssd")
-        if isinstance(daily, (int, float)):
-            values["HRV_dailyRmssd"] = daily
-        if isinstance(deep, (int, float)):
-            values["HRV_deepRmssd"] = deep
-        
-    intraday = data.get("HRV_intraday")
-    if isinstance(intraday, dict):
-        mins = intraday.get("minutes", [])
-        rmssd_vals = [m.get("rmssd") for m in mins if isinstance(m.get("rmssd"), (int, float))]
-        cov_vals = [m.get("coverage") for m in mins if isinstance(m.get("coverage"), (int, float))]
-        lf_vals = [m.get("lf") for m in mins if isinstance(m.get("lf"), (int, float))]
-        hf_vals = [m.get("hf") for m in mins if isinstance(m.get("hf"), (int, float))]
-        if rmssd_vals:
-            values["HRV_intraday_rmssd_mean"] = sum(rmssd_vals) / len(rmssd_vals)
-        if cov_vals:
-            values["HRV_intraday_coverage_mean"] = sum(cov_vals) / len(cov_vals)
-        if lf_vals:
-            lf_sorted = sorted(lf_vals)
-            values["HRV_intraday_lf_median"] = lf_sorted[len(lf_sorted)//2]
-        if hf_vals:
-            hf_sorted = sorted(hf_vals)
-            values["HRV_intraday_hf_median"] = hf_sorted[len(hf_sorted)//2]
-
-    proxy = data.get("HRV_Proxy", {})
-    if isinstance(proxy, dict):
-        rp = proxy.get("rmssd_proxy_ms")
-        sd = proxy.get("sdnn_proxy_ms")
-        pn = proxy.get("pnn50_proxy")
-        if isinstance(rp, (int, float)):
-            values["HRV_proxy_rmssd_ms"] = rp
-        if isinstance(sd, (int, float)):
-            values["HRV_proxy_sdnn_ms"] = sd
-        if isinstance(pn, (int, float)):
-            values["HRV_proxy_pnn50"] = pn        
-    sleep_list = data.get("Resumen_Sueño", [])
-    if isinstance(sleep_list, list) and sleep_list:
-        sleep = sleep_list[0]
-        summary = sleep.get("levels", {}).get("summary", {})
-        for stage in ("deep", "light", "rem", "wake"):
-            mins = summary.get(stage, {}).get("minutes")
-            if mins is not None:
-                values[f"sueño_{stage}_min"] = mins
-        if "minutesAsleep" in sleep:
-            values["minutos_dormidos"] = sleep["minutesAsleep"]
-        if "timeInBed" in sleep:
-            values["minutos_en_cama"] = sleep["timeInBed"]
-        
-        levels_data = sleep.get("levels", {}).get("data", [])
-        if isinstance(levels_data, list):
-            ciclos = sum(1 for seg in levels_data if seg.get("level") == "deep")
-            values["ciclos_sueño"] = ciclos
-
-    act = data.get("Resumen_Actividades", {})
-    if isinstance(act, dict):
-        for k in (
-            "sedentaryMinutes", "lightlyActiveMinutes",
-            "fairlyActiveMinutes", "veryActiveMinutes"
-        ):
-            v = act.get(k)
-            if isinstance(v, (int, float)):
-                values[k] = v
-                
-    if len(values) <= 1:
-        return None
-    
-    if use_current_ts:
-        ts = int(datetime.datetime.now().timestamp() * 1000)
-    else:
-        date_obj = datetime.datetime.strptime(data.get("Fecha"), "%Y-%m-%d").date()
-        ts = int(datetime.datetime.combine(date_obj, datetime.time()).timestamp() * 1000)
-
-    return {"ts": ts, "values": values}
-
-def generate_time_series_payloads(data, window_seconds, usuario):
-    buckets = {}
-    date_obj = datetime.datetime.strptime(data.get("Fecha"), "%Y-%m-%d").date()
-
-    if isinstance(data.get("Ritmo_Cardiaco"), dict):
-        for entry in data["Ritmo_Cardiaco"].get("dataset", []):
-            t = entry.get("time")
-            v = entry.get("value")
-            if not t or not isinstance(v, (int, float)):
-                continue
-            tm = datetime.datetime.strptime(t, "%H:%M:%S").time()
-            seconds = tm.hour * 3600 + tm.minute * 60 + tm.second
-            idx = seconds // window_seconds
-            buckets.setdefault(idx, {}).setdefault("Ritmo_Cardiaco", []).append(v)
-            
-    hrv_minutes = []
-    intraday = data.get("HRV_intraday")
-    if isinstance(intraday, dict):
-        hrv_minutes = intraday.get("minutes", [])
-    else:
-        hrv_list = data.get("HRV", [])
-        if isinstance(hrv_list, list):
-            for entry in hrv_list:
-                for minute in entry.get("minutes", []):
-                    val = minute.get("value", {})
-                    hrv_minutes.append({"time": minute.get("minute"), "rmssd": val.get("rmssd")})
-    for minute in hrv_minutes:
-        minute_ts = minute.get("time")
-        rmssd = minute.get("rmssd")
-        if not minute_ts or not isinstance(rmssd, (int, float)):
-            continue
-        dt = datetime.datetime.fromisoformat(minute_ts)
-        seconds = dt.hour * 3600 + dt.minute * 60 + dt.second
-        idx = seconds // window_seconds
-        buckets.setdefault(idx, {}).setdefault("HRV_RMSSD", []).append(rmssd)
-                
-    actividades = data.get("Actividades", {})
-    if isinstance(actividades, dict) and isinstance(actividades.get("steps"), list):
-        for entry in actividades["steps"]:
-            t = entry.get("time")
-            v = entry.get("value")
-            if not t or not isinstance(v, (int, float)):
-                continue
-            tm = datetime.datetime.strptime(t, "%H:%M:%S").time()
-            seconds = tm.hour * 3600 + tm.minute * 60 + tm.second
-            idx = seconds // window_seconds
-            buckets.setdefault(idx, {}).setdefault("steps", []).append(v)
-
-    spo2_list = data.get("SpO2", [])
-    if isinstance(spo2_list, list):
-        for entry in spo2_list:
-            minute = entry.get("minute")
-            v = entry.get("value")
-            if not minute or not isinstance(v, (int, float)):
-                continue
-            dt = datetime.datetime.fromisoformat(minute)
-            seconds = dt.hour * 3600 + dt.minute * 60 + dt.second
-            idx = seconds // window_seconds
-            buckets.setdefault(idx, {}).setdefault("SpO2", []).append(v)
-
-    payloads = []
-    for idx in sorted(buckets):
-        window_start = datetime.datetime.combine(date_obj, datetime.time()) + datetime.timedelta(seconds=idx * window_seconds)
-        ts = int(window_start.timestamp() * 1000)
-        values = {"Usuario": usuario}
-        for metric, vals in buckets[idx].items():
-            values[metric] = round(sum(vals) / len(vals))
-        payloads.append({"ts": ts, "values": values})
-
-    return payloads
-
-
-def generate_hrv_proxy_time_series_payloads(data, usuario):
-    """
-    Convierte data['HRV_Proxy_Series'] en payloads ThingsBoard.
-    Usa window_end como timestamp del bucket.
-    """
-    import datetime as _dt
-    series = data.get("HRV_Proxy_Series")
-    if not isinstance(series, list) or not series:
-        return []
-    payloads = []
-    for row in series:
-        end_iso = row.get("window_end")
-        if not end_iso:
-            continue
-        try:
-            ts = int(_dt.datetime.fromisoformat(end_iso).timestamp() * 1000)
-        except Exception:
-            continue
-        values = {
-            "Usuario": usuario,
-        }
-        for k_src, k_dst in [
-            ("rmssd_proxy_ms", "HRV_PROXY_RMSSD"),
-            ("sdnn_proxy_ms",  "HRV_PROXY_SDNN"),
-            ("pnn50_proxy",    "HRV_PROXY_PNN50"),
-            ("n",              "HRV_PROXY_N"),
-        ]:
-            v = row.get(k_src)
-            if isinstance(v, (int, float)):
-                values[k_dst] = v
-        payloads.append({"ts": ts, "values": values})
-    return payloads
-
-
-
-'''def main():
-    args = parse_args()
-    client_id = data.get("ID_Cliente") or data.get("ID_Usuario")
-    with open("thingsboard_tokens.json", "r") as f:
-        token_map = json.load(f)
-    token = token_map.get(client_id)
-    if not token:
-        print(f"No se encontró token para el client_id: {client_id}")
-        return
-    path = args.json_file if os.path.isabs(args.json_file) else os.path.join(os.getcwd(), args.json_file)
-    if not os.path.isfile(path):
-        alt = os.path.join(SCRIPT_DIR, args.json_file)
-        path = alt if os.path.isfile(alt) else path
-    with open(path, 'r', encoding='utf-8') as f:
-        data = json.load(f)
-    payloads = []
-    static = generate_static_payload(data)
-    if static:
-        payloads.append(static)
-    payloads.extend(generate_time_series_payloads(data, args.window))
-    if not payloads:
-        print("No hay datos para enviar.")
-        return
-    mqtt_publish(args.mqtt_host, args.mqtt_port, token, payloads)
-    print(f"Se enviaron {len(payloads)} mensajes.")
-'''
-
-#if __name__ == "__main__":
-    #main()
+    try:
+        for payload in payloads:
+            client.publish(TOPIC, json.dumps(payload), qos=1)
+    finally:
+        client.loop_stop()
+        client.disconnect()
