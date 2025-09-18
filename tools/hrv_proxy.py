@@ -1,10 +1,3 @@
-# tools/hrv_proxy.py
-# -*- coding: utf-8 -*-
-"""
-HRV proxies (RMSSD/SDNN/pNN50) estimados desde HR intradía (1s/1min).
-Aviso: Proxies ≠ HRV clínica; sirven como tendencia cuando no hay HRV intradía oficial.
-"""
-
 from __future__ import annotations
 from dataclasses import dataclass, asdict
 from datetime import datetime, timedelta
