@@ -22,8 +22,7 @@ from fitbit_service import (
     reauthenticate_scopes,
     get_fitbit_data,
 )
-from send_to_thingsboard import (
-    generate_hrv_proxy_time_series_payloads,
+from send_to_thingsboard import (
     generate_static_payload,
     generate_time_series_payloads,
     mqtt_publish,
@@ -139,7 +138,6 @@ class AutoFitRunner:
         if static:
             payloads.append(static)
         payloads.extend(generate_time_series_payloads(data, self.window, usuario))
-        payloads.extend(generate_hrv_proxy_time_series_payloads(data, usuario))
         return payloads
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
@@ -209,7 +207,8 @@ def monitor_mode(
                 for future in as_completed(futures):
                     message, _ = future.result()
                     print(message)
-            print(f" Esperando {interval} segundos para siguiente monitoreo...")
+            pause_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            print(f" Esperando {interval} segundos para siguiente monitoreo... ({pause_time})")
             time.sleep(interval)
     except KeyboardInterrupt:
         print(" Monitoreo detenido por el usuario.")
@@ -300,10 +299,12 @@ def main() -> None:
                 if summary:
                     print(summary)
         if batch_idx < total_batches:
-            print(f" Pausando {args.interval} segundos antes del siguiente lote...")
+            pause_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            print(f" Pausando {args.interval} segundos antes del siguiente lote... ({pause_time})")
             time.sleep(args.interval)
+    pause_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     print(" Backfill completado. Entrando a modo monitor...")
-    print(f" Esperando {args.interval} segundos antes de iniciar monitoreo...")
+    print(f" Esperando {args.interval} segundos antes de iniciar monitoreo... ({pause_time})")
     time.sleep(args.interval)
     monitor_mode(client_ids, credentials, tb_tokens, args.window, args.interval)
 if __name__ == "__main__":
@@ -312,3 +313,4 @@ if __name__ == "__main__":
     log_path = os.getenv("AUTO_FIT_LOG_FILE", os.path.join("logs", "auto_fit.log"))
     enable_terminal_log_mirroring(log_path)
     main()
+

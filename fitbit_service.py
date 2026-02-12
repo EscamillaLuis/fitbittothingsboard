@@ -8,7 +8,6 @@ import time
 from base64 import b64encode
 from dataclasses import dataclass
 from datetime import datetime, timedelta
-from statistics import mean
 from typing import Any, Callable, Dict, Iterator, List, Optional, Tuple
 import certifi
 import pandas as pd
@@ -43,10 +42,6 @@ OAUTH_SCOPES: List[str] = [
 ]
 REQUIRED_SCOPES = {scope.lower() for scope in OAUTH_SCOPES}
 USE_INTRADAY = os.getenv("USE_INTRADAY", "true").lower() == "true"
-HRV_PROXY_ENABLED = os.getenv("HRV_PROXY_ENABLED", "true").lower() == "true"
-HRV_PROXY_WINDOW_SECONDS = int(os.getenv("HRV_PROXY_WINDOW_SECONDS", "300"))
-HRV_PROXY_STEP_SECONDS = int(os.getenv("HRV_PROXY_STEP_SECONDS", "60"))
-HRV_PROXY_MIN_SAMPLES = int(os.getenv("HRV_PROXY_MIN_SAMPLES", "60"))
 logger = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO)
 logging.getLogger("urllib3").setLevel(logging.WARNING)
@@ -453,101 +448,6 @@ def parse_times_and_hr_from_data(data: Dict[str, Any]) -> Tuple[List[datetime], 
         except Exception:
             continue
     return times, values
-@dataclass
-class HRVProxyAggregate:
-    rmssd_proxy_ms: Optional[float]
-    sdnn_proxy_ms: Optional[float]
-    pnn50_proxy: Optional[float]
-    valid_samples: int
-def aggregate_proxies_from_hr(hr_values: List[int]) -> HRVProxyAggregate:
-    if not hr_values:
-        return HRVProxyAggregate(None, None, None, 0)
-    diffs = [abs(hr_values[i] - hr_values[i - 1]) for i in range(1, len(hr_values))]
-    if not diffs:
-        return HRVProxyAggregate(None, None, None, len(hr_values))
-    squared = [d ** 2 for d in diffs]
-    rmssd = math.sqrt(sum(squared) / len(squared))
-    mean_diff = mean(diffs)
-    sdnn = math.sqrt(sum((d - mean_diff) ** 2 for d in diffs) / len(diffs))
-    pnn50 = sum(1 for d in diffs if d > 50) / len(diffs)
-    return HRVProxyAggregate(rmssd, sdnn, pnn50, len(hr_values))
-def windowed_proxies(
-    times: List[datetime],
-    hr_values: List[int],
-    *,
-    window_seconds: int,
-    step_seconds: int,
-    min_samples: int,
-) -> List[Dict[str, Any]]:
-    if not times or not hr_values or len(times) != len(hr_values):
-        return []
-    series: List[Dict[str, Any]] = []
-    base = datetime.combine(datetime.today(), datetime.min.time())
-    zipped = sorted(zip(times, hr_values), key=lambda item: item[0])
-    time_list = [t for t, _ in zipped]
-    value_list = [v for _, v in zipped]
-    idx = 0
-    while idx < len(zipped):
-        window_start = time_list[idx]
-        window_end = window_start + timedelta(seconds=window_seconds)
-        bucket: List[int] = []
-        j = idx
-        while j < len(zipped) and time_list[j] < window_end:
-            bucket.append(value_list[j])
-            j += 1
-        if len(bucket) >= min_samples:
-            agg = aggregate_proxies_from_hr(bucket)
-            series.append(
-                {
-                    "window_start": (
-                        base
-                        + timedelta(
-                            hours=window_start.hour,
-                            minutes=window_start.minute,
-                            seconds=window_start.second,
-                        )
-                    ).isoformat(),
-                    "window_end": (
-                        base
-                        + timedelta(
-                            hours=window_end.hour,
-                            minutes=window_end.minute,
-                            seconds=window_end.second,
-                        )
-                    ).isoformat(),
-                    "rmssd_proxy_ms": agg.rmssd_proxy_ms,
-                    "sdnn_proxy_ms": agg.sdnn_proxy_ms,
-                    "pnn50_proxy": agg.pnn50_proxy,
-                    "n": agg.valid_samples,
-                }
-            )
-        next_threshold = window_start + timedelta(seconds=step_seconds)
-        while idx < len(zipped) and time_list[idx] < next_threshold:
-            idx += 1
-    return series
-def compute_and_attach_hrv_proxy(data: Dict[str, Any]) -> Dict[str, Any]:
-    try:
-        times, hr_values = parse_times_and_hr_from_data(data)
-        if not times:
-            return data
-        agg = aggregate_proxies_from_hr(hr_values)
-        series = windowed_proxies(
-            times,
-            hr_values,
-            window_seconds=HRV_PROXY_WINDOW_SECONDS,
-            step_seconds=HRV_PROXY_STEP_SECONDS,
-            min_samples=HRV_PROXY_MIN_SAMPLES,
-        )
-        data["HRV_Proxy"] = {
-            "rmssd_proxy_ms": agg.rmssd_proxy_ms,
-            "sdnn_proxy_ms": agg.sdnn_proxy_ms,
-            "pnn50_proxy": agg.pnn50_proxy,
-            "valid_samples": agg.valid_samples,
-        }
-        data["HRV_Proxy_Series"] = series
-    except Exception as exc:
-        logger.error("Error calculando HRV Proxy: %s", exc)
-    return data
 def _transform_spo2_minutes(payload: Any) -> Optional[List[Dict[str, Any]]]:
     if not payload:
         return None
@@ -1028,8 +928,6 @@ def get_fitbit_data(
     if hrv_intraday:
         result["HRV_intraday"] = hrv_intraday
     result["Frecuencia_Respiratoria"] = fetch_br_data(client_id, client_secret, date, client=fitbit)
-    if HRV_PROXY_ENABLED:
-        result = compute_and_attach_hrv_proxy(result)
     return result
 def save_daily_data(client_id: str, data: Dict[str, Any], *, data_dir: str = DATA_DIR) -> bool:
     client_dir = os.path.join(data_dir, client_id)
@@ -1138,27 +1036,6 @@ def create_hrv_sheet(writer: pd.ExcelWriter, data: Dict[str, Any], date: str) ->
     if isinstance(minutes, list) and minutes:
         df_minutes = pd.DataFrame(minutes)
         _write_sheet(writer, "HRV", df_minutes, startrow=len(df_daily) + 3 if not df_daily.empty else 3)
-def create_hrv_proxy_sheet(writer: pd.ExcelWriter, data: Dict[str, Any], date: str) -> None:
-    agg = data.get("HRV_Proxy") or {}
-    df_agg = pd.DataFrame(
-        [
-            {
-                "Fecha": date,
-                "rmssd_proxy_ms": agg.get("rmssd_proxy_ms"),
-                "sdnn_proxy_ms": agg.get("sdnn_proxy_ms"),
-                "pnn50_proxy": agg.get("pnn50_proxy"),
-                "valid_samples": agg.get("valid_samples"),
-                "ventana_s": HRV_PROXY_WINDOW_SECONDS,
-                "paso_s": HRV_PROXY_STEP_SECONDS,
-                "min_samples": HRV_PROXY_MIN_SAMPLES,
-            }
-        ]
-    )
-    _write_sheet(writer, "HRV_PROXY", df_agg)
-    series = data.get("HRV_Proxy_Series") or []
-    df_series = _safe_dataframe(series)
-    if not df_series.empty:
-        _write_sheet(writer, "HRV_PROXY", df_series, startrow=len(df_agg) + 3)
 def create_spo2_sheet(writer: pd.ExcelWriter, data: Dict[str, Any], date: str) -> None:
     spo2 = data.get("SpO2")
     if isinstance(spo2, list) and spo2:
@@ -1219,7 +1096,6 @@ SHEET_BUILDERS: List[Tuple[str, Callable[[pd.ExcelWriter, Dict[str, Any], str], 
     ("Actividades", create_activity_summary_sheet),
     ("Sueño", create_sleep_sheet),
     ("HRV", create_hrv_sheet),
-    ("HRV_PROXY", create_hrv_proxy_sheet),
     ("SpO2", create_spo2_sheet),
     ("Zonas_Actividad", create_activity_zones_sheet),
     ("Metas", create_goals_sheet),
@@ -1259,10 +1135,6 @@ __all__ = [
     "OAUTH_SCOPES",
     "REQUIRED_SCOPES",
     "USE_INTRADAY",
-    "HRV_PROXY_ENABLED",
-    "HRV_PROXY_WINDOW_SECONDS",
-    "HRV_PROXY_STEP_SECONDS",
-    "HRV_PROXY_MIN_SAMPLES",
     "load_tokens",
     "save_token",
     "check_scopes",
@@ -1277,7 +1149,6 @@ __all__ = [
     "fetch_br_data",
     "save_daily_data",
     "export_json_to_excel_single",
-    "compute_and_attach_hrv_proxy",
     "FitbitAPIClient",
     "TokenStore",
     "SHEET_BUILDERS",

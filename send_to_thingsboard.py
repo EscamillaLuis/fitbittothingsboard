@@ -161,12 +161,13 @@ def generate_static_payload(data: Dict, usuario: str, use_current_ts: bool = Fal
         day = dt.datetime.strptime(date_str, "%Y-%m-%d")
         timestamp = int(dt.datetime.combine(day.date(), dt.time()).timestamp() * 1000)
     return {"ts": timestamp, "values": values}
-def _add_sample(buckets, seconds: int, metric: str, value: float, window_seconds: int) -> None:
+def _add_sample(buckets, seconds: float, metric: str, value: float, window_seconds: int) -> None:
     if not isinstance(value, (int, float)):
         return
     if window_seconds <= 0:
         return
-    clamped_seconds = max(0, min(int(seconds), 86399))
+    seconds_int = int(seconds)
+    clamped_seconds = max(0, min(seconds_int, 86399))
     bucket_start = (clamped_seconds // window_seconds) * window_seconds
     buckets[bucket_start][metric].append(float(value))
 def _emit_bucket_payloads(
@@ -178,11 +179,11 @@ def _emit_bucket_payloads(
     if window_seconds <= 0:
         return []
     payloads: List[Dict] = []
-    for bucket_offset in sorted(buckets):
-        bucket_dt_local = base + dt.timedelta(seconds=bucket_offset)
-        ts = int(bucket_dt_local.astimezone(dt.timezone.utc).timestamp() * 1000)
+    for bucket_start_seconds in sorted(buckets):
+        bucket_start_dt_local = base + dt.timedelta(seconds=int(bucket_start_seconds))
+        ts = int(round(bucket_start_dt_local.astimezone(dt.timezone.utc).timestamp() * 1000.0))
         values = {"Usuario": usuario}
-        for metric, samples in buckets[bucket_offset].items():
+        for metric, samples in buckets[bucket_start_seconds].items():
             if not samples:
                 continue
             if metric in {"calories", "distance", "elevation", "steps"}:
@@ -195,17 +196,19 @@ def _emit_bucket_payloads(
         if len(values) > 1:
             payloads.append({"ts": ts, "values": values})
     return payloads
-def _time_to_seconds(time_str: str) -> Optional[int]:
+def _time_to_seconds(time_str: str) -> Optional[float]:
     if not isinstance(time_str, str):
         return None
-    for fmt in ("%H:%M:%S", "%H:%M:%S.%f"):
+    raw = time_str.strip()
+    for fmt in ("%H:%M:%S.%f", "%H:%M:%S"):
         try:
-            t_obj = dt.datetime.strptime(time_str, fmt).time()
-            return t_obj.hour * 3600 + t_obj.minute * 60 + t_obj.second
+            t_obj = dt.datetime.strptime(raw, fmt).time()
+            base_seconds = (t_obj.hour * 3600) + (t_obj.minute * 60) + t_obj.second
+            return float(base_seconds) + (t_obj.microsecond / 1_000_000.0)
         except ValueError:
             continue
     return None
-def _iso_to_seconds(value: str) -> Optional[int]:
+def _iso_to_seconds(value: str) -> Optional[float]:
     if not isinstance(value, str):
         return None
     seconds = _time_to_seconds(value)
@@ -220,8 +223,13 @@ def _iso_to_seconds(value: str) -> Optional[int]:
         return None
     if dt_obj.tzinfo is not None:
         dt_obj = dt_obj.astimezone(dt.timezone.utc)
-    return dt_obj.hour * 3600 + dt_obj.minute * 60 + dt_obj.second
-def _iso_to_seconds_local(value: str, tzname: Optional[str]) -> Optional[int]:
+    return (
+        dt_obj.hour * 3600
+        + dt_obj.minute * 60
+        + dt_obj.second
+        + dt_obj.microsecond / 1_000_000
+    )
+def _iso_to_seconds_local(value: str, tzname: Optional[str]) -> Optional[float]:
     if not isinstance(value, str):
         return None
     seconds = _time_to_seconds(value)
@@ -240,7 +248,7 @@ def _iso_to_seconds_local(value: str, tzname: Optional[str]) -> Optional[int]:
     else:
         dt_obj = dt_obj.astimezone(tzinfo)
     midnight = dt_obj.replace(hour=0, minute=0, second=0, microsecond=0)
-    return int((dt_obj - midnight).total_seconds())
+    return (dt_obj - midnight).total_seconds()
 def _parse_iso_datetime(value: str) -> Optional[dt.datetime]:
     if not isinstance(value, str):
         return None
@@ -280,7 +288,8 @@ def _format_ts(ts_ms: Optional[int]) -> str:
     return dt.datetime.fromtimestamp(ts_ms / 1000, tz=dt.timezone.utc).isoformat()
 def generate_time_series_payloads(data: Dict, window_seconds: int, usuario: str) -> List[Dict]:
     raw_mode = window_seconds <= 0
-    bucket_window = window_seconds if window_seconds > 0 else 60
+    aggregate_mode = window_seconds > 0
+    bucket_window = window_seconds if aggregate_mode else 60
     buckets: Dict[int, Dict[str, List[float]]] = defaultdict(lambda: defaultdict(list))
     date_str = data.get("Fecha")
     if not date_str:
@@ -292,6 +301,7 @@ def generate_time_series_payloads(data: Dict, window_seconds: int, usuario: str)
     n_hr_samples = 0
     n_spo2_samples = 0
     hr_raw_payloads: List[Dict] = []
+    hrv_raw_payloads: List[Dict] = []
     spo2_raw_payloads: List[Dict] = []
     first_ts_ms: Optional[int] = None
     last_ts_ms: Optional[int] = None
@@ -321,13 +331,13 @@ def generate_time_series_payloads(data: Dict, window_seconds: int, usuario: str)
         if seconds is None:
             continue
         sample_dt_local = base + dt.timedelta(seconds=seconds)
-        sample_ts_ms = int(sample_dt_local.astimezone(dt.timezone.utc).timestamp() * 1000)
+        sample_ts_ms = int(round(sample_dt_local.astimezone(dt.timezone.utc).timestamp() * 1000.0))
         _track_ts(sample_ts_ms)
         n_hr_samples += 1
-        if raw_mode:
-            hr_raw_payloads.append({"ts": sample_ts_ms, "values": {"Usuario": usuario, "Ritmo_Cardiaco": value}})
-        else:
+        if aggregate_mode:
             _add_sample(buckets, seconds, "Ritmo_Cardiaco", value, bucket_window)
+        else:
+            hr_raw_payloads.append({"ts": sample_ts_ms, "values": {"Usuario": usuario, "Ritmo_Cardiaco": value}})
     minutes: List[Dict] = []
     intraday = data.get("HRV_intraday")
     if isinstance(intraday, dict):
@@ -356,7 +366,16 @@ def generate_time_series_payloads(data: Dict, window_seconds: int, usuario: str)
         seconds = _iso_to_seconds_local(minute_ts, tz_name)
         if seconds is None:
             continue
-        _add_sample(buckets, seconds, "HRV_RMSSD", minute.get("rmssd"), bucket_window)
+        rmssd = minute.get("rmssd")
+        if aggregate_mode:
+            _add_sample(buckets, seconds, "HRV_RMSSD", rmssd, bucket_window)
+        elif isinstance(rmssd, (int, float)):
+            ts_ms = _minute_to_ts(minute_ts, tz_name)
+            if ts_ms is None:
+                sample_dt_local = base + dt.timedelta(seconds=seconds)
+                ts_ms = int(round(sample_dt_local.astimezone(dt.timezone.utc).timestamp() * 1000.0))
+            _track_ts(ts_ms)
+            hrv_raw_payloads.append({"ts": ts_ms, "values": {"Usuario": usuario, "HRV_RMSSD": float(rmssd)}})
     actividades = data.get("Actividades", {})
     if isinstance(actividades, dict):
         pass
@@ -392,15 +411,16 @@ def generate_time_series_payloads(data: Dict, window_seconds: int, usuario: str)
         offset_seconds = max(0, min(offset_seconds, 86399))
         _track_ts(ts_ms)
         n_spo2_samples += 1
-        if raw_mode:
-            spo2_raw_payloads.append({"ts": ts_ms, "values": {"Usuario": usuario, "SpO2": value}})
-        else:
+        if aggregate_mode:
             _add_sample(buckets, offset_seconds, "SpO2", value, bucket_window)
+        else:
+            spo2_raw_payloads.append({"ts": ts_ms, "values": {"Usuario": usuario, "SpO2": value}})
     agg_payloads = _emit_bucket_payloads(buckets, base, bucket_window, usuario)
     raw_payloads: List[Dict] = []
     raw_payloads.extend(hr_raw_payloads)
+    raw_payloads.extend(hrv_raw_payloads)
     raw_payloads.extend(spo2_raw_payloads)
-    if raw_payloads:
+    if raw_mode:
         raw_payloads.sort(key=lambda item: item["ts"])
         payloads = sorted(agg_payloads + raw_payloads, key=lambda item: item["ts"])
     else:
@@ -416,8 +436,6 @@ def generate_time_series_payloads(data: Dict, window_seconds: int, usuario: str)
         window_seconds,
     )
     return payloads
-def generate_hrv_proxy_time_series_payloads(data: Dict, usuario: str) -> List[Dict]:
-    return []
 def mqtt_publish(host: str, port: int, token: str, payloads: Iterable[Dict]) -> None:
     import time
     from collections import deque

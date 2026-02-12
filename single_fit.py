@@ -33,8 +33,7 @@ from fitbit_service import (
     save_daily_data,
     save_token,
 )
-from send_to_thingsboard import (
-    generate_hrv_proxy_time_series_payloads,
+from send_to_thingsboard import (
     generate_static_payload,
     generate_time_series_payloads,
     mqtt_publish,
@@ -67,7 +66,6 @@ class ThingsBoardPublisher:
         if static:
             payloads.append(static)
         payloads.extend(generate_time_series_payloads(data, 60, usuario))
-        payloads.extend(generate_hrv_proxy_time_series_payloads(data, usuario))
         if payloads:
             mqtt_publish(THINGSBOARD_MQTT_HOST, THINGSBOARD_MQTT_PORT, token, payloads)
 def store_daily_artifacts(client_id: str, date_str: str, data: Dict) -> str:
