@@ -303,6 +303,7 @@ def generate_time_series_payloads(data: Dict, window_seconds: int, usuario: str)
     hr_raw_payloads: List[Dict] = []
     hrv_raw_payloads: List[Dict] = []
     spo2_raw_payloads: List[Dict] = []
+    alert_raw_payloads: List[Dict] = []
     first_ts_ms: Optional[int] = None
     last_ts_ms: Optional[int] = None
     def _track_ts(ts_ms: Optional[int]) -> None:
@@ -415,16 +416,52 @@ def generate_time_series_payloads(data: Dict, window_seconds: int, usuario: str)
             _add_sample(buckets, offset_seconds, "SpO2", value, bucket_window)
         else:
             spo2_raw_payloads.append({"ts": ts_ms, "values": {"Usuario": usuario, "SpO2": value}})
+    alert_entries = data.get("Alertas_Intradia", [])
+    if isinstance(alert_entries, list):
+        for alert in alert_entries:
+            if not isinstance(alert, dict):
+                continue
+            window_end = alert.get("window_end")
+            if not isinstance(window_end, str):
+                continue
+            ts_ms = _minute_to_ts(window_end, tz_name)
+            if ts_ms is None:
+                seconds = _iso_to_seconds_local(window_end, tz_name)
+                if seconds is not None:
+                    sample_dt_local = base + dt.timedelta(seconds=seconds)
+                    ts_ms = int(round(sample_dt_local.astimezone(dt.timezone.utc).timestamp() * 1000.0))
+            if ts_ms is None:
+                continue
+            risk_value = _to_number(alert.get("risk_30m"))
+            alert_level = _to_number(alert.get("alert_level_30m"))
+            reason = alert.get("reason_30m")
+            if not isinstance(risk_value, (int, float)) or not isinstance(alert_level, (int, float)):
+                continue
+            _track_ts(ts_ms)
+            alert_raw_payloads.append(
+                {
+                    "ts": ts_ms,
+                    "values": {
+                        "Usuario": usuario,
+                        "Alerta_Nivel": int(alert_level),
+                        "Riesgo_30m": float(risk_value),
+                        "Alerta_Razon": reason if isinstance(reason, str) else "",
+                    },
+                }
+            )
     agg_payloads = _emit_bucket_payloads(buckets, base, bucket_window, usuario)
     raw_payloads: List[Dict] = []
     raw_payloads.extend(hr_raw_payloads)
     raw_payloads.extend(hrv_raw_payloads)
     raw_payloads.extend(spo2_raw_payloads)
+    raw_payloads.extend(alert_raw_payloads)
     if raw_mode:
         raw_payloads.sort(key=lambda item: item["ts"])
         payloads = sorted(agg_payloads + raw_payloads, key=lambda item: item["ts"])
     else:
-        payloads = agg_payloads
+        payloads = list(agg_payloads)
+        if alert_raw_payloads:
+            payloads.extend(sorted(alert_raw_payloads, key=lambda item: item["ts"]))
     logger.debug(
         "Intradia %s -> n_hr_samples=%s, n_spo2_samples=%s, first_ts=%s, last_ts=%s, payloads=%s, window=%s",
         date_str,

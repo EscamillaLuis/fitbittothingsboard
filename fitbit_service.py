@@ -1089,6 +1089,19 @@ def create_biometrics_sheet(writer: pd.ExcelWriter, data: Dict[str, Any], date: 
     df_entries = _safe_dataframe(entries)
     if not df_entries.empty:
         _write_sheet(writer, "Biometria", df_entries)
+
+
+def create_alertas_sheet(writer: pd.ExcelWriter, data: Dict[str, Any], date: str) -> None:
+    alertas = data.get("Alertas_Intradia")
+    if not isinstance(alertas, list) or not alertas:
+        return
+    df_alertas = _safe_dataframe(alertas)
+    if df_alertas.empty:
+        return
+    df_alertas.insert(0, "Fecha", date)
+    _write_sheet(writer, "Alertas_Intradia", df_alertas)
+
+
 SHEET_BUILDERS: List[Tuple[str, Callable[[pd.ExcelWriter, Dict[str, Any], str], None]]] = [
     ("Cliente", create_client_info_sheet),
     ("Ritmo_Cardiaco", create_heart_rate_sheet),
@@ -1103,6 +1116,7 @@ SHEET_BUILDERS: List[Tuple[str, Callable[[pd.ExcelWriter, Dict[str, Any], str], 
     ("Minutales", create_minute_activity_sheet),
     ("Resumen_RC", create_heart_rate_summary_sheet),
     ("Biometria", create_biometrics_sheet),
+    ("Alertas_Intradia", create_alertas_sheet),
 ]
 def export_json_to_excel_single(client_id: str, date: str, data_dir: str = DATA_DIR) -> None:
     client_path = os.path.join(data_dir, client_id)

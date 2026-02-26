@@ -8,6 +8,10 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Dict, Iterable, List, Optional, Tuple
+from analisis.motor_alertas_vivo import (
+    actualizar_baselines_historicos,
+    evaluar_hora_actual,
+)
 from fitbit_service import (
     CREDENTIALS_FILE,
     CLIENT_IDS_FILE,
@@ -78,6 +82,7 @@ DEFAULT_WINDOW = 60
 DEFAULT_INTERVAL = 3600
 DEFAULT_WORKERS = int(os.getenv("AUTO_FIT_WORKERS", "4"))
 DEFAULT_BATCH_SIZE = 5
+BASELINE_CACHE_MAX_AGE_SECONDS = 24 * 60 * 60
 def load_json(path: str) -> Dict:
     with open(path, "r", encoding="utf-8") as fh:
         return json.load(fh)
@@ -107,6 +112,10 @@ class AutoFitRunner:
         data = get_fitbit_data(client_id, secret, date_str, client=client)
         if not data:
             return f" Sin datos para {client_id} en {date_str}", False
+        try:
+            data = evaluar_hora_actual(client_id, data)
+        except Exception as exc:
+            print(f" Error en motor de alertas ({client_id} {date_str}): {exc}")
         self._persist_files(client_id, date_str, data)
         payloads = self._build_payloads(data, usuario)
         if payloads:
@@ -190,6 +199,26 @@ def _process_user_batch(
         if success:
             successes += 1
     return f" {client_id}: {successes}/{total} fechas ok"
+
+
+def _refresh_baselines_cache_if_needed() -> None:
+    cache_path = Path(DATA_DIR) / "baselines_cache.json"
+    should_refresh = True
+    if cache_path.exists():
+        age_seconds = time.time() - cache_path.stat().st_mtime
+        should_refresh = age_seconds > BASELINE_CACHE_MAX_AGE_SECONDS
+    if not should_refresh:
+        return
+    try:
+        ok = actualizar_baselines_historicos(DATA_DIR)
+        if ok:
+            print(" Baselines intradia actualizados.")
+        else:
+            print(" No se pudieron actualizar baselines intradia.")
+    except Exception as exc:
+        print(f" Error actualizando baselines intradia: {exc}")
+
+
 def monitor_mode(
     client_ids: List[str],
     credentials: Dict[str, str],
@@ -197,6 +226,7 @@ def monitor_mode(
     window: int,
     interval: int,
 ) -> None:
+    _refresh_baselines_cache_if_needed()
     runner = AutoFitRunner(credentials, tb_tokens, window=window, monitor=True)
     print(" Monitoreo horario activo. Presiona Ctrl+C para detener.")
     try:
