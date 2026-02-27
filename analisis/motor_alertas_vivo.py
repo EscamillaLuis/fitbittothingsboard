@@ -38,6 +38,7 @@ class ClientBaseline(TypedDict, total=False):
     SpO2: MetricBaseline
     Steps: MetricBaseline
     Sedentary: MetricBaseline
+    Sleep: MetricBaseline
 
 
 class BaselineCache(TypedDict, total=False):
@@ -240,6 +241,33 @@ def _extract_sedentary_samples(data: Mapping[str, Any], date_str: str, tzinfo: Z
     return out
 
 
+def _extract_sleep_daily(data: Mapping[str, Any]) -> Optional[float]:
+    sleep_summary = data.get("Resumen_Sue\u00f1o", [])
+    if not isinstance(sleep_summary, list) or not sleep_summary:
+        return None
+
+    entries = [entry for entry in sleep_summary if isinstance(entry, Mapping)]
+    if not entries:
+        return None
+
+    main_entries = [entry for entry in entries if entry.get("isMainSleep") is True]
+    candidates = main_entries or entries
+
+    for key in ("minutesAsleep", "timeInBed", "duration", "efficiency", "score"):
+        best_value: Optional[float] = None
+        for entry in candidates:
+            value = _safe_float(entry.get(key))
+            if value is None:
+                continue
+            if key == "duration":
+                value = value / 60000.0
+            if best_value is None or value > best_value:
+                best_value = value
+        if best_value is not None:
+            return best_value
+    return None
+
+
 def _aggregate_metric_30m(samples: Iterable[Tuple[datetime, float]]) -> Dict[datetime, float]:
     buckets: Dict[datetime, List[float]] = defaultdict(list)
     for sample_dt, value in samples:
@@ -387,6 +415,7 @@ def actualizar_baselines_historicos(data_dir: str) -> bool:
     try:
         files_by_client = _collect_recent_files(data_path)
         rows: List[Dict[str, Any]] = []
+        sleep_rows: List[Dict[str, Any]] = []
 
         for client_id, paths in files_by_client.items():
             for json_path in paths:
@@ -399,6 +428,9 @@ def actualizar_baselines_historicos(data_dir: str) -> bool:
                 if not isinstance(payload, dict):
                     continue
                 rows.extend(_build_window_rows(client_id, payload))
+                sleep_val = _extract_sleep_daily(payload)
+                if sleep_val is not None:
+                    sleep_rows.append({"client_id": client_id, "Sleep": sleep_val})
 
         cache: BaselineCache = {
             "generated_at": datetime.now(timezone.utc).isoformat(),
@@ -406,14 +438,32 @@ def actualizar_baselines_historicos(data_dir: str) -> bool:
             "clients": {},
         }
 
-        if rows:
+        if rows or sleep_rows:
             df = pd.DataFrame(rows)
+            sleep_df = pd.DataFrame(sleep_rows)
             clients_payload: Dict[str, ClientBaseline] = {}
+            clients_seen = set()
+            if not df.empty and "client_id" in df:
+                clients_seen.update(str(client) for client in df["client_id"].dropna().unique())
+            if not sleep_df.empty and "client_id" in sleep_df:
+                clients_seen.update(str(client) for client in sleep_df["client_id"].dropna().unique())
 
-            for client, group in df.groupby("client_id"):
+            for client in sorted(clients_seen):
                 client_baseline: ClientBaseline = {}
-                for key in ("HR", "HRV", "SpO2", "Steps", "Sedentary"):
-                    series = pd.to_numeric(group[key], errors="coerce").dropna()
+                group = df.loc[df["client_id"] == client] if not df.empty else pd.DataFrame()
+                client_sleep = (
+                    sleep_df.loc[sleep_df["client_id"] == client, "Sleep"]
+                    if not sleep_df.empty and "client_id" in sleep_df and "Sleep" in sleep_df
+                    else pd.Series(dtype=float)
+                )
+
+                for key in ("HR", "HRV", "SpO2", "Steps", "Sedentary", "Sleep"):
+                    if key == "Sleep":
+                        series = pd.to_numeric(client_sleep, errors="coerce").dropna()
+                    elif not group.empty and key in group:
+                        series = pd.to_numeric(group[key], errors="coerce").dropna()
+                    else:
+                        series = pd.Series(dtype=float)
                     if series.empty:
                         continue
                     client_baseline[key] = {
@@ -457,6 +507,7 @@ def evaluar_hora_actual(client_id: str, data_de_hoy: Dict[str, Any]) -> Dict[str
             return data_de_hoy
 
         rows = _build_window_rows(client_id, data_de_hoy)
+        sleep_val = _extract_sleep_daily(data_de_hoy)
         if not rows:
             data_de_hoy["Alertas_Intradia"] = []
             return data_de_hoy
@@ -475,6 +526,7 @@ def evaluar_hora_actual(client_id: str, data_de_hoy: Dict[str, Any]) -> Dict[str
             reason_components: List[str] = []
             risk_steps_val: Optional[float] = None
             risk_sedentary_val: Optional[float] = None
+            risk_sleep_val: Optional[float] = None
 
             if hr_val is not None:
                 risk_hr = _score_high(
@@ -523,6 +575,13 @@ def evaluar_hora_actual(client_id: str, data_de_hoy: Dict[str, Any]) -> Dict[str
                     _baseline_value(client_baseline, "Sedentary", "p90"),
                 )
 
+            if sleep_val is not None:
+                risk_sleep_val = _score_low(
+                    sleep_val,
+                    _baseline_value(client_baseline, "Sleep", "median"),
+                    _baseline_value(client_baseline, "Sleep", "p10"),
+                )
+
             if not risk_components and risk_steps_val is None and risk_sedentary_val is None:
                 yellow_streak = 0
                 continue
@@ -546,6 +605,7 @@ def evaluar_hora_actual(client_id: str, data_de_hoy: Dict[str, Any]) -> Dict[str
             }
             out["risk_steps"] = None if risk_steps_val is None else round(risk_steps_val, 4)
             out["risk_sedentary"] = None if risk_sedentary_val is None else round(risk_sedentary_val, 4)
+            out["risk_sleep"] = None if risk_sleep_val is None else round(risk_sleep_val, 4)
             alerts.append(out)
 
         data_de_hoy["Alertas_Intradia"] = alerts
