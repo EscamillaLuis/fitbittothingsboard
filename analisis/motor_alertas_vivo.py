@@ -515,9 +515,6 @@ def evaluar_hora_actual(client_id: str, data_de_hoy: Dict[str, Any]) -> Dict[str
                     _baseline_value(client_baseline, "Steps", "median"),
                     _baseline_value(client_baseline, "Steps", "p10"),
                 )
-                if risk_steps_val is not None:
-                    if risk_steps_val >= 0.9:
-                        reason_components.append("STEPS")
 
             if sedentary_val is not None:
                 risk_sedentary_val = _score_high(
@@ -525,31 +522,31 @@ def evaluar_hora_actual(client_id: str, data_de_hoy: Dict[str, Any]) -> Dict[str
                     _baseline_value(client_baseline, "Sedentary", "median"),
                     _baseline_value(client_baseline, "Sedentary", "p90"),
                 )
-                if risk_sedentary_val is not None:
-                    if risk_sedentary_val >= 0.9:
-                        reason_components.append("SEDENTARY")
 
             if not risk_components and risk_steps_val is None and risk_sedentary_val is None:
                 yellow_streak = 0
                 continue
 
-            risk_30m = float(mean(risk_components)) if risk_components else 0.0
-            yellow = risk_30m >= 0.9
-            red = (risk_30m >= 1.2) or (yellow and yellow_streak >= 1)
-            alert_level = 2 if red else (1 if yellow else 0)
-            yellow_streak = yellow_streak + 1 if yellow else 0
+            if risk_components:
+                risk_30m = float(mean(risk_components))
+                yellow = risk_30m >= 0.9
+                red = (risk_30m >= 1.2) or (yellow and yellow_streak >= 1)
+                alert_level = 2 if red else (1 if yellow else 0)
+                yellow_streak = yellow_streak + 1 if yellow else 0
+            else:
+                risk_30m = 0.0
+                alert_level = 0
 
             reason_text = "; ".join(reason_components) if reason_components else "Sin señales fuertes vs baseline intradía"
-            alerts.append(
-                {
-                    "window_end": row.get("window_end"),
-                    "risk_30m": round(risk_30m, 4),
-                    "risk_steps": None if risk_steps_val is None else round(risk_steps_val, 4),
-                    "risk_sedentary": None if risk_sedentary_val is None else round(risk_sedentary_val, 4),
-                    "alert_level_30m": alert_level,
-                    "reason_30m": reason_text,
-                }
-            )
+            out = {
+                "window_end": row.get("window_end"),
+                "risk_30m": round(risk_30m, 4),
+                "alert_level_30m": alert_level,
+                "reason_30m": reason_text,
+            }
+            out["risk_steps"] = None if risk_steps_val is None else round(risk_steps_val, 4)
+            out["risk_sedentary"] = None if risk_sedentary_val is None else round(risk_sedentary_val, 4)
+            alerts.append(out)
 
         data_de_hoy["Alertas_Intradia"] = alerts
         return data_de_hoy
@@ -557,6 +554,5 @@ def evaluar_hora_actual(client_id: str, data_de_hoy: Dict[str, Any]) -> Dict[str
         logger.exception("Error evaluando alertas intradía para %s", client_id)
         data_de_hoy["Alertas_Intradia"] = []
         return data_de_hoy
-
 
 __all__ = ["actualizar_baselines_historicos", "evaluar_hora_actual"]
