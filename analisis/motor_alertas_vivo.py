@@ -473,6 +473,8 @@ def evaluar_hora_actual(client_id: str, data_de_hoy: Dict[str, Any]) -> Dict[str
 
             risk_components: List[float] = []
             reason_components: List[str] = []
+            risk_steps_val: Optional[float] = None
+            risk_sedentary_val: Optional[float] = None
 
             if hr_val is not None:
                 risk_hr = _score_high(
@@ -508,32 +510,30 @@ def evaluar_hora_actual(client_id: str, data_de_hoy: Dict[str, Any]) -> Dict[str
                         reason_components.append("SpO2")
 
             if steps_val is not None:
-                risk_steps = _score_low(
+                risk_steps_val = _score_low(
                     steps_val,
                     _baseline_value(client_baseline, "Steps", "median"),
                     _baseline_value(client_baseline, "Steps", "p10"),
                 )
-                if risk_steps is not None:
-                    risk_components.append(risk_steps)
-                    if risk_steps >= 0.9:
+                if risk_steps_val is not None:
+                    if risk_steps_val >= 0.9:
                         reason_components.append("STEPS")
 
             if sedentary_val is not None:
-                risk_sedentary = _score_high(
+                risk_sedentary_val = _score_high(
                     sedentary_val,
                     _baseline_value(client_baseline, "Sedentary", "median"),
                     _baseline_value(client_baseline, "Sedentary", "p90"),
                 )
-                if risk_sedentary is not None:
-                    risk_components.append(risk_sedentary)
-                    if risk_sedentary >= 0.9:
+                if risk_sedentary_val is not None:
+                    if risk_sedentary_val >= 0.9:
                         reason_components.append("SEDENTARY")
 
-            if not risk_components:
+            if not risk_components and risk_steps_val is None and risk_sedentary_val is None:
                 yellow_streak = 0
                 continue
 
-            risk_30m = float(mean(risk_components))
+            risk_30m = float(mean(risk_components)) if risk_components else 0.0
             yellow = risk_30m >= 0.9
             red = (risk_30m >= 1.2) or (yellow and yellow_streak >= 1)
             alert_level = 2 if red else (1 if yellow else 0)
@@ -544,6 +544,8 @@ def evaluar_hora_actual(client_id: str, data_de_hoy: Dict[str, Any]) -> Dict[str
                 {
                     "window_end": row.get("window_end"),
                     "risk_30m": round(risk_30m, 4),
+                    "risk_steps": None if risk_steps_val is None else round(risk_steps_val, 4),
+                    "risk_sedentary": None if risk_sedentary_val is None else round(risk_sedentary_val, 4),
                     "alert_level_30m": alert_level,
                     "reason_30m": reason_text,
                 }
