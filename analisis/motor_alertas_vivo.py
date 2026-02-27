@@ -36,6 +36,8 @@ class ClientBaseline(TypedDict, total=False):
     HR: MetricBaseline
     HRV: MetricBaseline
     SpO2: MetricBaseline
+    Steps: MetricBaseline
+    Sedentary: MetricBaseline
 
 
 class BaselineCache(TypedDict, total=False):
@@ -195,6 +197,49 @@ def _extract_spo2_samples(data: Mapping[str, Any], date_str: str, tzinfo: ZoneIn
     return out
 
 
+def _extract_steps_samples(data: Mapping[str, Any], date_str: str, tzinfo: ZoneInfo) -> List[Tuple[datetime, float]]:
+    activities = data.get("Actividades")
+    if not isinstance(activities, Mapping):
+        return []
+    dataset = activities.get("steps")
+    if not isinstance(dataset, list):
+        return []
+
+    out: List[Tuple[datetime, float]] = []
+    for entry in dataset:
+        if not isinstance(entry, Mapping):
+            continue
+        value = _safe_float(entry.get("value"))
+        if value is None:
+            continue
+        sample_dt = _parse_sample_dt(entry.get("time"), date_str, tzinfo)
+        if sample_dt is None:
+            continue
+        out.append((sample_dt, value))
+    return out
+
+
+def _extract_sedentary_samples(data: Mapping[str, Any], date_str: str, tzinfo: ZoneInfo) -> List[Tuple[datetime, float]]:
+    activities = data.get("Actividades")
+    if not isinstance(activities, Mapping):
+        return []
+    dataset = activities.get("calories")
+    if not isinstance(dataset, list):
+        return []
+
+    out: List[Tuple[datetime, float]] = []
+    for entry in dataset:
+        if not isinstance(entry, Mapping):
+            continue
+        sample_dt = _parse_sample_dt(entry.get("time"), date_str, tzinfo)
+        if sample_dt is None:
+            continue
+        level = _safe_float(entry.get("level"))
+        sedentary_flag = 1.0 if level == 0.0 else 0.0
+        out.append((sample_dt, sedentary_flag))
+    return out
+
+
 def _aggregate_metric_30m(samples: Iterable[Tuple[datetime, float]]) -> Dict[datetime, float]:
     buckets: Dict[datetime, List[float]] = defaultdict(list)
     for sample_dt, value in samples:
@@ -208,6 +253,19 @@ def _aggregate_metric_30m(samples: Iterable[Tuple[datetime, float]]) -> Dict[dat
     return {window_end: float(mean(values)) for window_end, values in buckets.items() if values}
 
 
+def _aggregate_metric_30m_sum(samples: Iterable[Tuple[datetime, float]]) -> Dict[datetime, float]:
+    buckets: Dict[datetime, List[float]] = defaultdict(list)
+    for sample_dt, value in samples:
+        start = sample_dt.replace(
+            minute=(sample_dt.minute // WINDOW_MINUTES) * WINDOW_MINUTES,
+            second=0,
+            microsecond=0,
+        )
+        window_end = start + timedelta(minutes=WINDOW_MINUTES)
+        buckets[window_end].append(value)
+    return {window_end: float(sum(values)) for window_end, values in buckets.items() if values}
+
+
 def _build_window_rows(client_id: str, data: Mapping[str, Any]) -> List[Dict[str, Any]]:
     date_str = str(data.get("Fecha") or "").strip()
     if not date_str:
@@ -215,11 +273,19 @@ def _build_window_rows(client_id: str, data: Mapping[str, Any]) -> List[Dict[str
     tz_name = data.get("Timezone")
     tzinfo = _resolve_tz(tz_name if isinstance(tz_name, str) else None)
 
-    hr_30m = _aggregate_metric_30m(_extract_hr_samples(data, date_str, tzinfo))
-    hrv_30m = _aggregate_metric_30m(_extract_hrv_samples(data, date_str, tzinfo))
-    spo2_30m = _aggregate_metric_30m(_extract_spo2_samples(data, date_str, tzinfo))
+    hr_samples = _extract_hr_samples(data, date_str, tzinfo)
+    hrv_samples = _extract_hrv_samples(data, date_str, tzinfo)
+    spo2_samples = _extract_spo2_samples(data, date_str, tzinfo)
+    steps_samples = _extract_steps_samples(data, date_str, tzinfo)
+    sedentary_samples = _extract_sedentary_samples(data, date_str, tzinfo)
 
-    all_windows = sorted(set(hr_30m) | set(hrv_30m) | set(spo2_30m))
+    hr_30m = _aggregate_metric_30m(hr_samples)
+    hrv_30m = _aggregate_metric_30m(hrv_samples)
+    spo2_30m = _aggregate_metric_30m(spo2_samples)
+    steps_30m = _aggregate_metric_30m_sum(steps_samples)
+    sedentary_30m = _aggregate_metric_30m(sedentary_samples)
+
+    all_windows = sorted(set(hr_30m) | set(hrv_30m) | set(spo2_30m) | set(steps_30m) | set(sedentary_30m))
     rows: List[Dict[str, Any]] = []
     for window_end in all_windows:
         rows.append(
@@ -229,6 +295,8 @@ def _build_window_rows(client_id: str, data: Mapping[str, Any]) -> List[Dict[str
                 "HR": hr_30m.get(window_end),
                 "HRV": hrv_30m.get(window_end),
                 "SpO2": spo2_30m.get(window_end),
+                "Steps": steps_30m.get(window_end),
+                "Sedentary": sedentary_30m.get(window_end),
             }
         )
     return rows
@@ -344,11 +412,11 @@ def actualizar_baselines_historicos(data_dir: str) -> bool:
 
             for client, group in df.groupby("client_id"):
                 client_baseline: ClientBaseline = {}
-                for metric in ("HR", "HRV", "SpO2"):
-                    series = pd.to_numeric(group[metric], errors="coerce").dropna()
+                for key in ("HR", "HRV", "SpO2", "Steps", "Sedentary"):
+                    series = pd.to_numeric(group[key], errors="coerce").dropna()
                     if series.empty:
                         continue
-                    client_baseline[metric] = {
+                    client_baseline[key] = {
                         "median": float(series.median()),
                         "p10": float(series.quantile(0.10)),
                         "p90": float(series.quantile(0.90)),
@@ -400,6 +468,8 @@ def evaluar_hora_actual(client_id: str, data_de_hoy: Dict[str, Any]) -> Dict[str
             hr_val = _safe_float(row.get("HR"))
             hrv_val = _safe_float(row.get("HRV"))
             spo2_val = _safe_float(row.get("SpO2"))
+            steps_val = _safe_float(row.get("Steps"))
+            sedentary_val = _safe_float(row.get("Sedentary"))
 
             risk_components: List[float] = []
             reason_components: List[str] = []
@@ -436,6 +506,28 @@ def evaluar_hora_actual(client_id: str, data_de_hoy: Dict[str, Any]) -> Dict[str
                     risk_components.append(risk_spo2)
                     if risk_spo2 >= 0.9:
                         reason_components.append("SpO2")
+
+            if steps_val is not None:
+                risk_steps = _score_low(
+                    steps_val,
+                    _baseline_value(client_baseline, "Steps", "median"),
+                    _baseline_value(client_baseline, "Steps", "p10"),
+                )
+                if risk_steps is not None:
+                    risk_components.append(risk_steps)
+                    if risk_steps >= 0.9:
+                        reason_components.append("STEPS")
+
+            if sedentary_val is not None:
+                risk_sedentary = _score_high(
+                    sedentary_val,
+                    _baseline_value(client_baseline, "Sedentary", "median"),
+                    _baseline_value(client_baseline, "Sedentary", "p90"),
+                )
+                if risk_sedentary is not None:
+                    risk_components.append(risk_sedentary)
+                    if risk_sedentary >= 0.9:
+                        reason_components.append("SEDENTARY")
 
             if not risk_components:
                 yellow_streak = 0
