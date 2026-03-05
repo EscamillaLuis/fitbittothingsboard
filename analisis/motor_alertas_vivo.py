@@ -596,7 +596,7 @@ def evaluar_hora_actual(client_id: str, data_de_hoy: Dict[str, Any]) -> Dict[str
                 risk_30m = 0.0
                 alert_level = 0
 
-            reason_text = "; ".join(reason_components) if reason_components else "Sin señales fuertes vs baseline intradía"
+            reason_text = "; ".join(reason_components) if reason_components else "Sin señales fuertes"
             out = {
                 "window_end": row.get("window_end"),
                 "risk_30m": round(risk_30m, 4),
