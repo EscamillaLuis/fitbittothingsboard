@@ -506,7 +506,7 @@ def mqtt_publish(host: str, port: int, token: str, payloads: Iterable[Dict]) -> 
     from collections import deque
     import json as _json
     import os as _os
-    msgs_per_sec = int(_os.getenv("TB_MSGS_PER_SEC", "70"))
+    msgs_per_sec = int(_os.getenv("TB_MSGS_PER_SEC", "75"))
     batch_size = int(_os.getenv("TB_BATCH_SIZE", "1"))
     keepalive = int(_os.getenv("TB_KEEPALIVE", "60"))
     interval = 1.0 / max(1, msgs_per_sec)
