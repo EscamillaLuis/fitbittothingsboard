@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import logging
 import math
+import numbers
 import os
 import re
 from collections import defaultdict
@@ -19,6 +20,10 @@ DEFAULT_DATA_DIR = os.getenv("FITBIT_DATA_DIR", "fitbit_data")
 BASELINE_CACHE_NAME = "baselines_cache.json"
 BASELINE_DAYS = 14
 WINDOW_MINUTES = 30
+MIN_COV_3D = 100
+MIN_COV_7D = 200
+PERSIST_YELLOW_RATE = 0.01
+PERSIST_RED_RATE = 0.03
 
 _DATE_PATTERN = re.compile(r"^(?P<date>\d{4}-\d{2}-\d{2})_.*\.json$")
 
@@ -39,6 +44,7 @@ class ClientBaseline(TypedDict, total=False):
     Steps: MetricBaseline
     Sedentary: MetricBaseline
     Sleep: MetricBaseline
+    history_14d: List[Dict[str, Any]]
 
 
 class BaselineCache(TypedDict, total=False):
@@ -58,7 +64,9 @@ def _resolve_tz(tz_name: Optional[str]) -> ZoneInfo:
 
 
 def _safe_float(value: Any) -> Optional[float]:
-    if isinstance(value, (int, float)) and not isinstance(value, bool):
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, numbers.Real):
         numeric = float(value)
         return numeric if math.isfinite(numeric) else None
     if isinstance(value, str):
@@ -384,6 +392,17 @@ def _score_low(value: float, baseline: Optional[float], p10: Optional[float]) ->
     return max(0.0, min(2.0, raw))
 
 
+def _alert_levels_from_risk(risk: pd.Series, cov: pd.Series, min_cov: int) -> pd.Series:
+    ok = cov.fillna(0) >= min_cov
+    yellow = (risk >= 0.9) & ok
+    yellow2 = yellow.rolling(window=2, min_periods=2).sum().ge(2)
+    red = ((risk >= 1.2) & ok) | yellow2
+    levels = pd.Series(0, index=risk.index, dtype="int64")
+    levels.loc[yellow] = 1
+    levels.loc[red] = 2
+    return levels
+
+
 def _load_cache(cache_path: Path) -> BaselineCache:
     if not cache_path.exists():
         return {}
@@ -402,6 +421,81 @@ def _baseline_value(client_baseline: Mapping[str, Any], metric: str, key: str) -
     if not isinstance(metric_data, Mapping):
         return None
     return _safe_float(metric_data.get(key))
+
+
+def _build_history_14d(group: pd.DataFrame, client_baseline: Mapping[str, Any]) -> List[Dict[str, Any]]:
+    if group is None or group.empty:
+        return []
+
+    history_rows: List[Dict[str, Any]] = []
+    baseline_hr = _baseline_value(client_baseline, "HR", "median")
+    baseline_hr_p90 = _baseline_value(client_baseline, "HR", "p90")
+    baseline_hrv = _baseline_value(client_baseline, "HRV", "median")
+    baseline_hrv_p10 = _baseline_value(client_baseline, "HRV", "p10")
+    baseline_spo2 = _baseline_value(client_baseline, "SpO2", "median")
+    baseline_spo2_p10 = _baseline_value(client_baseline, "SpO2", "p10")
+
+    for record in group.to_dict("records"):
+        window_end = record.get("window_end")
+        if not window_end:
+            continue
+
+        hr_val = _safe_float(record.get("HR"))
+        hrv_val = _safe_float(record.get("HRV"))
+        spo2_val = _safe_float(record.get("SpO2"))
+
+        risk_components: List[float] = []
+        if hr_val is not None:
+            risk_hr = _score_high(hr_val, baseline_hr, baseline_hr_p90)
+            if risk_hr is not None:
+                risk_components.append(risk_hr)
+        if hrv_val is not None:
+            risk_hrv = _score_low(hrv_val, baseline_hrv, baseline_hrv_p10)
+            if risk_hrv is not None:
+                risk_components.append(risk_hrv)
+        if spo2_val is not None:
+            risk_spo2 = _score_low(spo2_val, baseline_spo2, baseline_spo2_p10)
+            if risk_spo2 is not None:
+                risk_components.append(risk_spo2)
+
+        comp_count = len(risk_components)
+        risk_30m = float(mean(risk_components)) if risk_components else None
+        history_rows.append(
+            {
+                "window_end": window_end,
+                "risk_30m": risk_30m,
+                "comp_count_30m": comp_count,
+            }
+        )
+
+    if not history_rows:
+        return []
+
+    history_df = pd.DataFrame(history_rows)
+    history_df["window_end"] = pd.to_datetime(history_df["window_end"], errors="coerce")
+    history_df = history_df.dropna(subset=["window_end"])
+    if history_df.empty:
+        return []
+
+    history_df = history_df.sort_values("window_end").set_index("window_end")
+    history_df["alert_level_30m"] = _alert_levels_from_risk(
+        history_df["risk_30m"],
+        history_df["comp_count_30m"],
+        min_cov=1,
+    )
+
+    history_df = history_df.reset_index()
+    out: List[Dict[str, Any]] = []
+    for row in history_df.itertuples(index=False):
+        risk_val = row.risk_30m
+        out.append(
+            {
+                "window_end": row.window_end.strftime("%Y-%m-%dT%H:%M:%S"),
+                "risk_30m": None if pd.isna(risk_val) else float(risk_val),
+                "alert_level_30m": int(row.alert_level_30m) if not pd.isna(row.alert_level_30m) else 0,
+            }
+        )
+    return out
 
 
 def actualizar_baselines_historicos(data_dir: str) -> bool:
@@ -473,6 +567,8 @@ def actualizar_baselines_historicos(data_dir: str) -> bool:
                         "count": int(series.shape[0]),
                     }
                 if client_baseline:
+                    history_14d = _build_history_14d(group, client_baseline)
+                    client_baseline["history_14d"] = history_14d
                     clients_payload[str(client)] = client_baseline
 
             cache["clients"] = clients_payload
@@ -506,6 +602,14 @@ def evaluar_hora_actual(client_id: str, data_de_hoy: Dict[str, Any]) -> Dict[str
             data_de_hoy["Alertas_Intradia"] = []
             return data_de_hoy
 
+        history_raw = client_baseline.get("history_14d")
+        history_df = pd.DataFrame(history_raw) if isinstance(history_raw, list) else pd.DataFrame()
+        if not history_df.empty:
+            history_df["window_end"] = pd.to_datetime(history_df.get("window_end"), errors="coerce")
+            history_df["risk_30m"] = pd.to_numeric(history_df.get("risk_30m"), errors="coerce")
+            history_df["alert_level_30m"] = pd.to_numeric(history_df.get("alert_level_30m"), errors="coerce")
+            history_df = history_df.dropna(subset=["window_end"])
+
         rows = _build_window_rows(client_id, data_de_hoy)
         sleep_val = _extract_sleep_daily(data_de_hoy)
         if not rows:
@@ -513,6 +617,7 @@ def evaluar_hora_actual(client_id: str, data_de_hoy: Dict[str, Any]) -> Dict[str
             return data_de_hoy
 
         alerts: List[Dict[str, Any]] = []
+        alerts_roll_rows: List[Dict[str, Any]] = []
         yellow_streak = 0
 
         for row in sorted(rows, key=lambda item: str(item.get("window_end"))):
@@ -582,6 +687,7 @@ def evaluar_hora_actual(client_id: str, data_de_hoy: Dict[str, Any]) -> Dict[str
                     _baseline_value(client_baseline, "Sleep", "p10"),
                 )
 
+            comp_count = len(risk_components)
             if not risk_components and risk_steps_val is None and risk_sedentary_val is None:
                 yellow_streak = 0
                 continue
@@ -607,6 +713,129 @@ def evaluar_hora_actual(client_id: str, data_de_hoy: Dict[str, Any]) -> Dict[str
             out["risk_sedentary"] = None if risk_sedentary_val is None else round(risk_sedentary_val, 4)
             out["risk_sleep"] = None if risk_sleep_val is None else round(risk_sleep_val, 4)
             alerts.append(out)
+            alerts_roll_rows.append(
+                {
+                    "window_end": row.get("window_end"),
+                    "risk_30m": risk_30m if comp_count > 0 else None,
+                    "alert_level_30m": alert_level,
+                }
+            )
+
+        alerts_roll_df = pd.DataFrame(alerts_roll_rows)
+        if not alerts_roll_df.empty:
+            alerts_roll_df["window_end"] = pd.to_datetime(alerts_roll_df.get("window_end"), errors="coerce")
+            alerts_roll_df["risk_30m"] = pd.to_numeric(alerts_roll_df.get("risk_30m"), errors="coerce")
+            alerts_roll_df["alert_level_30m"] = pd.to_numeric(alerts_roll_df.get("alert_level_30m"), errors="coerce")
+            alerts_roll_df = alerts_roll_df.dropna(subset=["window_end"])
+
+        combined_df = pd.concat([history_df, alerts_roll_df], ignore_index=True)
+        metrics_by_window: Dict[str, Any] = {}
+
+        if not combined_df.empty:
+            combined_df["window_end"] = pd.to_datetime(combined_df.get("window_end"), errors="coerce")
+            combined_df = combined_df.dropna(subset=["window_end"])
+
+            if not combined_df.empty:
+                combined_df["risk_30m"] = pd.to_numeric(combined_df.get("risk_30m"), errors="coerce")
+                combined_df["alert_level_30m"] = pd.to_numeric(combined_df.get("alert_level_30m"), errors="coerce")
+                combined_df = combined_df.sort_values("window_end").set_index("window_end")
+
+                combined_df["risk_n_3d"] = combined_df["risk_30m"].rolling("3D", min_periods=1).count()
+                combined_df["risk_n_7d"] = combined_df["risk_30m"].rolling("7D", min_periods=1).count()
+                combined_df["risk_3d"] = combined_df["risk_30m"].rolling("3D", min_periods=1).mean()
+                combined_df["risk_7d"] = combined_df["risk_30m"].rolling("7D", min_periods=1).mean()
+
+                combined_df["alert_level_3d"] = _alert_levels_from_risk(
+                    combined_df["risk_3d"],
+                    combined_df["risk_n_3d"],
+                    min_cov=MIN_COV_3D,
+                )
+                combined_df["alert_level_7d"] = _alert_levels_from_risk(
+                    combined_df["risk_7d"],
+                    combined_df["risk_n_7d"],
+                    min_cov=MIN_COV_7D,
+                )
+
+                avail = combined_df["risk_30m"].notna()
+                any_alert = (combined_df["alert_level_30m"] > 0).astype(float)
+                red_alert = (combined_df["alert_level_30m"] == 2).astype(float)
+                any_alert.loc[~avail] = float("nan")
+                red_alert.loc[~avail] = float("nan")
+
+                for horizon, tag, base_cov in (("3D", "3d", MIN_COV_3D), ("7D", "7d", MIN_COV_7D)):
+                    n_av = combined_df["risk_30m"].rolling(horizon, min_periods=1).count()
+                    rate_any = any_alert.rolling(horizon, min_periods=1).mean()
+                    rate_red = red_alert.rolling(horizon, min_periods=1).mean()
+
+                    combined_df[f"persist_rate_any_{tag}"] = rate_any
+                    ok = n_av.fillna(0) >= base_cov
+                    persist_y = (rate_any >= PERSIST_YELLOW_RATE) & ok
+                    persist_r = ((rate_red >= PERSIST_RED_RATE) | (rate_any >= (PERSIST_RED_RATE * 2))) & ok
+
+                    levels = pd.Series(0, index=rate_any.index, dtype="int64")
+                    levels.loc[persist_y] = 1
+                    levels.loc[persist_r] = 2
+                    combined_df[f"persist_level_{tag}"] = levels
+
+                date_str = data_de_hoy.get("Fecha")
+                target_date = None
+                if isinstance(date_str, str) and date_str:
+                    try:
+                        target_date = datetime.strptime(date_str, "%Y-%m-%d").date()
+                    except ValueError:
+                        target_date = None
+
+                if target_date is not None:
+                    combined_reset = combined_df.reset_index()
+                    today_df = combined_reset.loc[combined_reset["window_end"].dt.date == target_date]
+                    metrics_by_window = {
+                        row["window_end"].strftime("%Y-%m-%dT%H:%M:%S"): row
+                        for _, row in today_df.iterrows()
+                    }
+
+        def _as_number(value: Any) -> Optional[float]:
+            if value is None:
+                return None
+            try:
+                num = float(value)
+            except (TypeError, ValueError):
+                return None
+            return num if math.isfinite(num) else None
+
+        defaults = {
+            "risk_3d": None,
+            "risk_7d": None,
+            "alert_level_3d": None,
+            "alert_level_7d": None,
+            "persist_rate_any_3d": None,
+            "persist_rate_any_7d": None,
+            "persist_level_3d": None,
+            "persist_level_7d": None,
+        }
+
+        for alert in alerts:
+            alert.update(defaults)
+            metrics = metrics_by_window.get(alert.get("window_end"))
+            if metrics is None:
+                continue
+            risk_3d_val = _as_number(metrics.get("risk_3d"))
+            risk_7d_val = _as_number(metrics.get("risk_7d"))
+            rate_3d_val = _as_number(metrics.get("persist_rate_any_3d"))
+            rate_7d_val = _as_number(metrics.get("persist_rate_any_7d"))
+            level_3d_val = _as_number(metrics.get("alert_level_3d"))
+            level_7d_val = _as_number(metrics.get("alert_level_7d"))
+            persist_3d_val = _as_number(metrics.get("persist_level_3d"))
+            persist_7d_val = _as_number(metrics.get("persist_level_7d"))
+
+            alert["risk_3d"] = None if risk_3d_val is None else round(risk_3d_val, 4)
+            alert["risk_7d"] = None if risk_7d_val is None else round(risk_7d_val, 4)
+            alert["persist_rate_any_3d"] = None if rate_3d_val is None else round(rate_3d_val, 4)
+            alert["persist_rate_any_7d"] = None if rate_7d_val is None else round(rate_7d_val, 4)
+
+            alert["alert_level_3d"] = None if level_3d_val is None else int(level_3d_val)
+            alert["alert_level_7d"] = None if level_7d_val is None else int(level_7d_val)
+            alert["persist_level_3d"] = None if persist_3d_val is None else int(persist_3d_val)
+            alert["persist_level_7d"] = None if persist_7d_val is None else int(persist_7d_val)
 
         data_de_hoy["Alertas_Intradia"] = alerts
         return data_de_hoy
