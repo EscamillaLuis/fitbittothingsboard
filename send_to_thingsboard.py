@@ -434,19 +434,38 @@ def generate_time_series_payloads(data: Dict, window_seconds: int, usuario: str)
                 continue
             risk_value = _to_number(alert.get("risk_30m"))
             alert_level = _to_number(alert.get("alert_level_30m"))
+            risk_3d = _to_number(alert.get("risk_3d"))
+            risk_7d = _to_number(alert.get("risk_7d"))
+            alert_level_3d = _to_number(alert.get("alert_level_3d"))
+            alert_level_7d = _to_number(alert.get("alert_level_7d"))
+            persist_level_3d = _to_number(alert.get("persist_level_3d"))
+            persist_level_7d = _to_number(alert.get("persist_level_7d"))
             reason = alert.get("reason_30m")
             if not isinstance(risk_value, (int, float)) or not isinstance(alert_level, (int, float)):
                 continue
             _track_ts(ts_ms)
+            values = {
+                "Usuario": usuario,
+                "Alerta_Nivel": int(alert_level),
+                "Riesgo_30m": float(risk_value),
+                "Alerta_Razon": reason if isinstance(reason, str) else "",
+            }
+            if isinstance(risk_3d, (int, float)):
+                values["risk_3d"] = float(risk_3d)
+            if isinstance(risk_7d, (int, float)):
+                values["risk_7d"] = float(risk_7d)
+            if isinstance(alert_level_3d, (int, float)):
+                values["alert_level_3d"] = int(alert_level_3d)
+            if isinstance(alert_level_7d, (int, float)):
+                values["alert_level_7d"] = int(alert_level_7d)
+            if isinstance(persist_level_3d, (int, float)):
+                values["persist_level_3d"] = int(persist_level_3d)
+            if isinstance(persist_level_7d, (int, float)):
+                values["persist_level_7d"] = int(persist_level_7d)
             alert_raw_payloads.append(
                 {
                     "ts": ts_ms,
-                    "values": {
-                        "Usuario": usuario,
-                        "Alerta_Nivel": int(alert_level),
-                        "Riesgo_30m": float(risk_value),
-                        "Alerta_Razon": reason if isinstance(reason, str) else "",
-                    },
+                    "values": values,
                 }
             )
     agg_payloads = _emit_bucket_payloads(buckets, base, bucket_window, usuario)
