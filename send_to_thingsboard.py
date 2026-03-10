@@ -436,10 +436,13 @@ def generate_time_series_payloads(data: Dict, window_seconds: int, usuario: str)
             alert_level = _to_number(alert.get("alert_level_30m"))
             risk_3d = _to_number(alert.get("risk_3d"))
             risk_7d = _to_number(alert.get("risk_7d"))
+            risk_14d = _to_number(alert.get("risk_14d"))
             alert_level_3d = _to_number(alert.get("alert_level_3d"))
             alert_level_7d = _to_number(alert.get("alert_level_7d"))
+            alert_level_14d = _to_number(alert.get("alert_level_14d"))
             persist_level_3d = _to_number(alert.get("persist_level_3d"))
             persist_level_7d = _to_number(alert.get("persist_level_7d"))
+            persist_level_14d = _to_number(alert.get("persist_level_14d"))
             reason = alert.get("reason_30m")
             if not isinstance(risk_value, (int, float)) or not isinstance(alert_level, (int, float)):
                 continue
@@ -451,17 +454,23 @@ def generate_time_series_payloads(data: Dict, window_seconds: int, usuario: str)
                 "Alerta_Razon": reason if isinstance(reason, str) else "",
             }
             if isinstance(risk_3d, (int, float)):
-                values["risk_3d"] = float(risk_3d)
+                values["Riesgo_3d"] = float(risk_3d)
             if isinstance(risk_7d, (int, float)):
-                values["risk_7d"] = float(risk_7d)
+                values["Riesgo_7d"] = float(risk_7d)
+            if isinstance(risk_14d, (int, float)):
+                values["Riesgo_14d"] = float(risk_14d)
             if isinstance(alert_level_3d, (int, float)):
                 values["alert_level_3d"] = int(alert_level_3d)
             if isinstance(alert_level_7d, (int, float)):
                 values["alert_level_7d"] = int(alert_level_7d)
+            if isinstance(alert_level_14d, (int, float)):
+                values["alert_level_14d"] = int(alert_level_14d)
             if isinstance(persist_level_3d, (int, float)):
-                values["persist_level_3d"] = int(persist_level_3d)
+                values["Persist_level_3d"] = int(persist_level_3d)
             if isinstance(persist_level_7d, (int, float)):
-                values["persist_level_7d"] = int(persist_level_7d)
+                values["Persist_level_7d"] = int(persist_level_7d)
+            if isinstance(persist_level_14d, (int, float)):
+                values["Persist_level_14d"] = int(persist_level_14d)
             alert_raw_payloads.append(
                 {
                     "ts": ts_ms,
@@ -497,7 +506,7 @@ def mqtt_publish(host: str, port: int, token: str, payloads: Iterable[Dict]) -> 
     from collections import deque
     import json as _json
     import os as _os
-    msgs_per_sec = int(_os.getenv("TB_MSGS_PER_SEC", "80"))
+    msgs_per_sec = int(_os.getenv("TB_MSGS_PER_SEC", "70"))
     batch_size = int(_os.getenv("TB_BATCH_SIZE", "1"))
     keepalive = int(_os.getenv("TB_KEEPALIVE", "60"))
     interval = 1.0 / max(1, msgs_per_sec)
