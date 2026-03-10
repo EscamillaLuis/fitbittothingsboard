@@ -22,6 +22,7 @@ BASELINE_DAYS = 14
 WINDOW_MINUTES = 30
 MIN_COV_3D = 100
 MIN_COV_7D = 200
+MIN_COV_14D = 400
 PERSIST_YELLOW_RATE = 0.01
 PERSIST_RED_RATE = 0.03
 
@@ -742,8 +743,10 @@ def evaluar_hora_actual(client_id: str, data_de_hoy: Dict[str, Any]) -> Dict[str
 
                 combined_df["risk_n_3d"] = combined_df["risk_30m"].rolling("3D", min_periods=1).count()
                 combined_df["risk_n_7d"] = combined_df["risk_30m"].rolling("7D", min_periods=1).count()
+                combined_df["risk_n_14d"] = combined_df["risk_30m"].rolling("14D", min_periods=1).count()
                 combined_df["risk_3d"] = combined_df["risk_30m"].rolling("3D", min_periods=1).mean()
                 combined_df["risk_7d"] = combined_df["risk_30m"].rolling("7D", min_periods=1).mean()
+                combined_df["risk_14d"] = combined_df["risk_30m"].rolling("14D", min_periods=1).mean()
 
                 combined_df["alert_level_3d"] = _alert_levels_from_risk(
                     combined_df["risk_3d"],
@@ -755,6 +758,11 @@ def evaluar_hora_actual(client_id: str, data_de_hoy: Dict[str, Any]) -> Dict[str
                     combined_df["risk_n_7d"],
                     min_cov=MIN_COV_7D,
                 )
+                combined_df["alert_level_14d"] = _alert_levels_from_risk(
+                    combined_df["risk_14d"],
+                    combined_df["risk_n_14d"],
+                    min_cov=MIN_COV_14D,
+                )
 
                 avail = combined_df["risk_30m"].notna()
                 any_alert = (combined_df["alert_level_30m"] > 0).astype(float)
@@ -762,7 +770,11 @@ def evaluar_hora_actual(client_id: str, data_de_hoy: Dict[str, Any]) -> Dict[str
                 any_alert.loc[~avail] = float("nan")
                 red_alert.loc[~avail] = float("nan")
 
-                for horizon, tag, base_cov in (("3D", "3d", MIN_COV_3D), ("7D", "7d", MIN_COV_7D)):
+                for horizon, tag, base_cov in (
+                    ("3D", "3d", MIN_COV_3D),
+                    ("7D", "7d", MIN_COV_7D),
+                    ("14D", "14d", MIN_COV_14D),
+                ):
                     n_av = combined_df["risk_30m"].rolling(horizon, min_periods=1).count()
                     rate_any = any_alert.rolling(horizon, min_periods=1).mean()
                     rate_red = red_alert.rolling(horizon, min_periods=1).mean()
@@ -805,12 +817,16 @@ def evaluar_hora_actual(client_id: str, data_de_hoy: Dict[str, Any]) -> Dict[str
         defaults = {
             "risk_3d": None,
             "risk_7d": None,
+            "risk_14d": None,
             "alert_level_3d": None,
             "alert_level_7d": None,
+            "alert_level_14d": None,
             "persist_rate_any_3d": None,
             "persist_rate_any_7d": None,
+            "persist_rate_any_14d": None,
             "persist_level_3d": None,
             "persist_level_7d": None,
+            "persist_level_14d": None,
         }
 
         for alert in alerts:
@@ -820,22 +836,30 @@ def evaluar_hora_actual(client_id: str, data_de_hoy: Dict[str, Any]) -> Dict[str
                 continue
             risk_3d_val = _as_number(metrics.get("risk_3d"))
             risk_7d_val = _as_number(metrics.get("risk_7d"))
+            risk_14d_val = _as_number(metrics.get("risk_14d"))
             rate_3d_val = _as_number(metrics.get("persist_rate_any_3d"))
             rate_7d_val = _as_number(metrics.get("persist_rate_any_7d"))
+            rate_14d_val = _as_number(metrics.get("persist_rate_any_14d"))
             level_3d_val = _as_number(metrics.get("alert_level_3d"))
             level_7d_val = _as_number(metrics.get("alert_level_7d"))
+            level_14d_val = _as_number(metrics.get("alert_level_14d"))
             persist_3d_val = _as_number(metrics.get("persist_level_3d"))
             persist_7d_val = _as_number(metrics.get("persist_level_7d"))
+            persist_14d_val = _as_number(metrics.get("persist_level_14d"))
 
             alert["risk_3d"] = None if risk_3d_val is None else round(risk_3d_val, 4)
             alert["risk_7d"] = None if risk_7d_val is None else round(risk_7d_val, 4)
+            alert["risk_14d"] = None if risk_14d_val is None else round(risk_14d_val, 4)
             alert["persist_rate_any_3d"] = None if rate_3d_val is None else round(rate_3d_val, 4)
             alert["persist_rate_any_7d"] = None if rate_7d_val is None else round(rate_7d_val, 4)
+            alert["persist_rate_any_14d"] = None if rate_14d_val is None else round(rate_14d_val, 4)
 
             alert["alert_level_3d"] = None if level_3d_val is None else int(level_3d_val)
             alert["alert_level_7d"] = None if level_7d_val is None else int(level_7d_val)
+            alert["alert_level_14d"] = None if level_14d_val is None else int(level_14d_val)
             alert["persist_level_3d"] = None if persist_3d_val is None else int(persist_3d_val)
             alert["persist_level_7d"] = None if persist_7d_val is None else int(persist_7d_val)
+            alert["persist_level_14d"] = None if persist_14d_val is None else int(persist_14d_val)
 
         data_de_hoy["Alertas_Intradia"] = alerts
         return data_de_hoy
