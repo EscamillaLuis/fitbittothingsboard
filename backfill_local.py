@@ -106,11 +106,20 @@ def main() -> None:
                 usuario=tb_usuario,
             )
 
-            if payloads:
+            alert_payloads = [
+                p
+                for p in payloads
+                if "Riesgo_30m" in p.get("values", {})
+                or "Alerta_Nivel" in p.get("values", {})
+            ]
+
+            if alert_payloads:
                 try:
-                    mqtt_publish(TB_HOST, TB_PORT, tb_token, payloads)
+                    mqtt_publish(TB_HOST, TB_PORT, tb_token, alert_payloads)
                     date_str = current_date.strftime("%Y-%m-%d")
-                    print(f"Enviados {len(payloads)} payloads para {client_id} en {date_str}")
+                    print(
+                        f"Enviados {len(alert_payloads)} payloads para {client_id} en {date_str}"
+                    )
                 except Exception as exc:
                     date_str = current_date.strftime("%Y-%m-%d")
                     print(f"Error publicando {client_id} {date_str}: {exc}")
